@@ -1,6 +1,9 @@
+const fs = require("fs");
 const express = require("express");
 const bodyParser = require("body-parser");
 const admin = require("firebase-admin");
+const multer = require("multer");
+const upload = multer({ dest: "uploads/" });
 const cors = require("cors");
 const app = express();
 const port = 3001;
@@ -53,32 +56,79 @@ async function getUserFCMToken(userId) {
   return data?.fcm_token;
 }
 
-// Notification sending function
-const sendNotification = async (userId, senderName) => {
-  const userToken = await getUserFCMToken(userId);
-
-  if (!userToken) {
-    console.log("No FCM token found for user:", userId);
-    return;
-  }
-
+app.post("/profile-pics", upload.single("file"), async (req, res) => {
   try {
-    await admin.messaging().send({
-      token: userToken,
-      notification: {
-        title: "New Roll Request",
-        body: `${senderName} wants to roll with you!`,
-      },
-      data: {
-        type: "roll_request",
-      },
-    });
-    console.log("Notification sent successfully to:", userId);
-  } catch (error) {
-    console.error("Error sending notification:", error);
-  }
-};
+    console.log("File upload request received");
+    console.log("req.file:", req.file);
+    console.log("req.body:", req.body);
 
+    // Check if file was uploaded
+    if (!req.file) {
+      return res.status(400).json({
+        error: "No file uploaded",
+        details: "Please select a file to upload",
+      });
+    }
+
+    // Read the uploaded file using the path provided by multer
+    const fileBuffer = fs.readFileSync(req.file.path);
+    console.log("File read successfully, size:", fileBuffer.length);
+
+    // Generate a unique filename
+    const fileExtension = req.file.originalname.split(".").pop();
+    const uniqueFileName = `profile-pic-${Date.now()}-${Math.random()
+      .toString(36)
+      .substring(7)}.${fileExtension}`;
+
+    // Upload to Supabase storage
+    const { data, error } = await supabase.storage
+      .from("profile-pics")
+      .upload(uniqueFileName, fileBuffer, {
+        contentType: req.file.mimetype,
+        upsert: false,
+      });
+
+    // Clean up the temporary file
+    fs.unlinkSync(req.file.path);
+
+    if (error) {
+      console.error("Supabase storage error:", error);
+      return res.status(500).json({
+        error: "Failed to upload to storage",
+        details: error.message,
+      });
+    }
+
+    console.log("File uploaded successfully:", data);
+
+    // Get the public URL for the uploaded file
+    const {
+      data: { publicUrl },
+    } = supabase.storage.from("profile-pics").getPublicUrl(uniqueFileName);
+
+    res.json({
+      message: "File uploaded successfully",
+      data: data,
+      publicUrl: publicUrl,
+    });
+  } catch (error) {
+    console.error("Error in profile-pics upload:", error);
+
+    // Clean up temp file if it exists
+    if (req.file && req.file.path) {
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (cleanupError) {
+        console.error("Error cleaning up temp file:", cleanupError);
+      }
+    }
+
+    res.status(500).json({
+      error: "File upload failed",
+      details: error.message,
+    });
+  }
+});
 // Login endpoint - update user status
 app.post("/login", verifyToken, async (req, res) => {
   try {
@@ -113,91 +163,183 @@ app.get("/check-user", verifyToken, async (req, res, next) => {
       throw error;
     }
 
-    res.status(200).json({ exists: !!data });
+    res.status(200).json(data);
   } catch (error) {
     next(error);
   }
 });
 
-// Registration endpoint
+// Registration endpoint with profile picture upload
 app.post("/register", verifyToken, async (req, res, next) => {
   console.log("Received request body:", req.body);
+
   try {
+    // Check if location exists in request body
+    if (
+      !req.body.location ||
+      !req.body.location.lat ||
+      !req.body.location.lng
+    ) {
+      return res.status(400).json({
+        error: "Location data is required",
+        details: "Please provide latitude and longitude coordinates",
+      });
+    }
+
+    let avatarUrl = req.user.picture; // Default to Firebase user picture
+
+    // Handle profile picture URL if provided in body
+    if (req.body.profilePhoto && req.body.profilePhoto !== req.user.picture) {
+      console.log("Using uploaded profile picture URL:", req.body.profilePhoto);
+      avatarUrl = req.body.profilePhoto;
+    }
+
     // Convert location to PostGIS point format
     const locationPoint = `POINT(${req.body.location.lng} ${req.body.location.lat})`;
 
+    // Calculate default weight range
+    const weightRangeMin = req.body.weight - 20;
+    const weightRangeMax = req.body.weight + 20;
+
+    // Prepare user data
+    const userData = {
+      id: req.user.uid,
+      first_name: req.body.first_name,
+      last_name: req.body.last_name,
+      email: req.user.email,
+      avatar_url: avatarUrl, // Use uploaded image URL or fallback
+      gender: req.body.gender,
+      age: req.body.age || 0,
+      weight: req.body.weight,
+      belt: req.body.belt,
+      stripes: parseInt(req.body.stripes) || 0,
+      height: req.body.height,
+      dob: req.body.dob,
+
+      // Default values for fields not collected in onboarding
+      primary_gym: "Not specified",
+      style_preference: "both",
+      years_experience: 0,
+      competition_experience: false,
+      weight_range_min: weightRangeMin,
+      weight_range_max: weightRangeMax,
+      is_online: true,
+      last_online: new Date().toISOString(),
+      looking_for_roll: req.body.looking_for_roll || false,
+      available_now: req.body.available_now || false,
+      location: locationPoint,
+      city: req.body.location.city || "Unknown",
+      fcm_token: req.body.fcm_token || null,
+    };
+
+    console.log("Prepared user data:", userData);
+
+    // Insert user data
     const { data, error } = await supabase
       .from("users")
-      .insert([
-        {
-          id: req.user.uid,
-          first_name: req.body.first_name,
-          last_name: req.body.last_name,
-          email: req.user.email,
-          avatar_url: req.user.picture,
-          primary_gym: req.body.primary_gym,
-          gender: req.body.gender,
-          age: req.body.age,
-          weight: req.body.weight,
-          belt: req.body.belt,
-          stripes: req.body.stripes,
-          style_preference: req.body.style_preference,
-          years_experience: req.body.years_experience,
-          competition_experience: req.body.competition_experience,
-          intensity_level: req.body.intensity_level,
-          weight_range_min: req.body.weight_range_min,
-          weight_range_max: req.body.weight_range_max,
-          is_online: true,
-          last_online: new Date().toISOString(),
-          looking_for_roll: req.body.looking_for_roll,
-          available_now: req.body.available_now,
-          location: locationPoint,
-          city: req.body.location.city,
-          fcm_token: req.body.fcm_token,
-        },
-      ])
+      .insert([userData])
       .select();
 
     console.log("Supabase response data:", data);
 
-    if (error) throw error;
-
-    // After creating user, insert their availability
-    if (req.body.availability) {
-      const { error: availError } = await supabase.from("availability").insert(
-        req.body.availability.map((avail) => ({
-          user_id: req.user.uid,
-          ...avail,
-        }))
-      );
-
-      if (availError) throw availError;
+    if (error) {
+      console.error("Supabase error:", error);
+      throw error;
     }
 
-    res.status(200).json(data[0]);
+    // Insert default availability
+    const defaultAvailability = [
+      {
+        user_id: req.user.uid,
+        day: "monday",
+        morning: false,
+        afternoon: false,
+        evening: true,
+        night: false,
+      },
+      {
+        user_id: req.user.uid,
+        day: "tuesday",
+        morning: false,
+        afternoon: false,
+        evening: true,
+        night: false,
+      },
+      {
+        user_id: req.user.uid,
+        day: "wednesday",
+        morning: false,
+        afternoon: false,
+        evening: true,
+        night: false,
+      },
+      {
+        user_id: req.user.uid,
+        day: "thursday",
+        morning: false,
+        afternoon: false,
+        evening: true,
+        night: false,
+      },
+      {
+        user_id: req.user.uid,
+        day: "friday",
+        morning: false,
+        afternoon: false,
+        evening: true,
+        night: false,
+      },
+      {
+        user_id: req.user.uid,
+        day: "saturday",
+        morning: true,
+        afternoon: true,
+        evening: false,
+        night: false,
+      },
+      {
+        user_id: req.user.uid,
+        day: "sunday",
+        morning: true,
+        afternoon: true,
+        evening: false,
+        night: false,
+      },
+    ];
+
+    const { error: defaultAvailError } = await supabase
+      .from("availability")
+      .insert(defaultAvailability);
+
+    if (defaultAvailError) {
+      console.error("Error adding default availability:", defaultAvailError);
+      // Don't throw here, just log it
+    }
+
+    res.status(200).json({
+      ...data[0],
+      profilePictureUploaded: !!(
+        req.body.profilePhoto && req.body.profilePhoto !== req.user.picture
+      ),
+      profilePictureUrl: avatarUrl,
+    });
   } catch (error) {
-    next(error);
+    console.error("Server error:", error);
+
+    res.status(500).json({
+      error: "Registration failed",
+      details: error.message,
+    });
   }
 });
 
-// Get nearby users
-app.get("/nearby", verifyToken, async (req, res, next) => {
+// Get all users for feed
+app.get("/users", verifyToken, async (req, res, next) => {
   try {
-    const { lat, lng, radius = 10000 } = req.query;
-
-    const { data, error } = await supabase.rpc("find_nearby_users", {
-      lat: parseFloat(lat),
-      lng: parseFloat(lng),
-      radius_meters: parseInt(radius),
-    });
-
-    if (error) throw error;
-
-    // Filter out the requesting user
-    const nearbyUsers = data.filter((user) => user.id !== req.user.uid);
-    res.status(200).json(nearbyUsers);
+    const { data, error } = await supabase.from("users").select();
+    return res.json(data);
   } catch (error) {
-    next(error);
+    res.json(error);
   }
 });
 
@@ -693,7 +835,22 @@ app.post("/logout", verifyToken, async (req, res, next) => {
     next(error);
   }
 });
+app.post("/deleteUser", verifyToken, async (req, res, next) => {
+  console.log("DELETE USER", req.user);
+  try {
+    const { data, error } = await supabase
+      .from("users")
+      .delete()
+      .eq("id", req.user.uid)
+      .select();
 
+    if (error) throw error;
+    console.log("DELETE USER DATA ", data);
+    res.status(200).json({ message: "Deleted user successfully", data });
+  } catch (error) {
+    next(error);
+  }
+});
 // Helper function to check availability overlap
 function hasAvailabilityOverlap(userAvail1, userAvail2) {
   const days = [
