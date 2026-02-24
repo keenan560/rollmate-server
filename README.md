@@ -110,6 +110,26 @@ Create a `.env` file with:
 PORT=3001
 ```
 
+## Deployment
+
+### Render
+
+The project includes a `render.yaml` configuration file. Render will automatically:
+- Run `npm install` to install dependencies
+- Run `npm start` to start the server
+
+If you have a custom start command in your Render dashboard, update it to:
+```
+npm start
+```
+
+Or simply use:
+```
+node index.js
+```
+
+The root `index.js` file redirects to `src/server.js` for backward compatibility.
+
 ## Technologies
 
 - Express.js
