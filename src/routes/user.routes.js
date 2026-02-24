@@ -68,6 +68,7 @@ router.post("/register", verifyToken, async (req, res, next) => {
       primary_gym: req.body.primary_gym,
       style_preference: "both",
       competition_experience: false,
+      is_instructor: req.body.is_instructor || false,
       weight_range_min: weightRangeMin,
       weight_range_max: weightRangeMax,
       is_online: true,
@@ -198,7 +199,7 @@ router.get("/users", verifyToken, async (req, res) => {
     let query = supabase
       .from("users")
       .select(
-        "id, first_name, last_name, email, avatar_url, primary_gym, gender, age, weight, belt, stripes, height, style_preference, competition_experience, bjj_start_year, city, location, dob",
+        "id, first_name, last_name, email, avatar_url, primary_gym, gender, age, weight, belt, stripes, height, style_preference, competition_experience, bjj_start_year, city, location, dob, is_instructor",
       )
       .neq("id", currentUserId);
 
@@ -260,7 +261,7 @@ router.get("/users/:userId", verifyToken, async (req, res) => {
   const { data, error } = await supabase
     .from("users")
     .select(
-      "id, first_name, last_name, email, avatar_url, primary_gym, gender, age, weight, belt, stripes, height, style_preference, competition_experience, bjj_start_year, city, location, dob",
+      "id, first_name, last_name, email, avatar_url, primary_gym, gender, age, weight, belt, stripes, height, style_preference, competition_experience, bjj_start_year, city, location, dob, is_instructor",
     )
     .eq("id", userId)
     .single();
@@ -300,7 +301,6 @@ router.post("/update-profile", verifyToken, async (req, res) => {
     console.log("Update data:", updateData);
 
     const updates = {};
-
     if (updateData.first_name !== undefined)
       updates.first_name = updateData.first_name;
     if (updateData.last_name !== undefined)
@@ -317,7 +317,9 @@ router.post("/update-profile", verifyToken, async (req, res) => {
       updates.bjj_start_year = updateData.bjj_start_year;
     if (updateData.avatar_url !== undefined)
       updates.avatar_url = updateData.avatar_url;
-
+    if (updateData.is_instructor !== undefined)
+      // ← ADD THIS LINE
+      updates.is_instructor = updateData.is_instructor; // ← ADD THIS LINE
     if (updateData.location && updateData.location.lng !== undefined) {
       updates.location = `POINT(${updateData.location.lng} ${updateData.location.lat})`;
       if (updateData.location.city) updates.city = updateData.location.city;
