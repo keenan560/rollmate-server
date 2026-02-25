@@ -8,6 +8,8 @@ const chatRoutes = require("./chat.routes");
 const postRoutes = require("./post.routes");
 const achievementRoutes = require("./achievement.routes");
 const newsRoutes = require("./news.routes");
+const beltVerificationRoutes = require("./beltVerification.routes");
+const beltEndorsementRoutes = require("./beltEndorsement.routes");
 
 // Mount routes
 router.use("/", authRoutes);
@@ -17,5 +19,7 @@ router.use("/", chatRoutes);
 router.use("/", postRoutes);
 router.use("/", achievementRoutes);
 router.use("/", newsRoutes);
+router.use("/", beltVerificationRoutes);
+router.use("/", beltEndorsementRoutes);
 
 module.exports = router;

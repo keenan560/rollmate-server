@@ -19,6 +19,21 @@ router.get("/check-user", verifyToken, async (req, res, next) => {
       throw error;
     }
 
+    // Extract coordinates from PostGIS geometry if location exists
+    if (data && data.location) {
+      const { data: coords, error: coordError } = await supabase.rpc(
+        "get_coordinates",
+        {
+          geom: data.location,
+        },
+      );
+
+      if (!coordError && coords) {
+        data.latitude = coords.lat;
+        data.longitude = coords.lng;
+      }
+    }
+
     res.status(200).json(data);
   } catch (error) {
     next(error);
@@ -41,7 +56,6 @@ router.post("/register", verifyToken, async (req, res, next) => {
     }
 
     let avatarUrl = req.user.picture;
-
     if (req.body.profilePhoto && req.body.profilePhoto !== req.user.picture) {
       console.log("Using uploaded profile picture URL:", req.body.profilePhoto);
       avatarUrl = req.body.profilePhoto;
@@ -184,8 +198,8 @@ router.get("/users", verifyToken, async (req, res) => {
     const page = parseInt(req.query.page, 10) || 1;
     const limit = parseInt(req.query.limit, 10) || 30;
     const offset = (page - 1) * limit;
-
     const { age, weight, belt, gender, name } = req.query;
+
     console.log("Fetching users with filters:", {
       age,
       weight,
@@ -196,44 +210,16 @@ router.get("/users", verifyToken, async (req, res) => {
       limit,
     });
 
-    let query = supabase
-      .from("users")
-      .select(
-        "id, first_name, last_name, email, avatar_url, primary_gym, gender, age, weight, belt, stripes, height, style_preference, competition_experience, bjj_start_year, city, location, dob, is_instructor",
-      )
-      .neq("id", currentUserId);
-
-    if (belt) {
-      query = query.ilike("belt", belt);
-    }
-
-    if (gender) {
-      query = query.ilike("gender", gender);
-    }
-
-    if (age) {
-      const ageNum = parseInt(age, 10);
-      const minAge = ageNum - 5;
-      const maxAge = ageNum + 5;
-      query = query.gte("age", minAge).lte("age", maxAge);
-    }
-
-    if (weight) {
-      const weightNum = parseInt(weight, 10);
-      const minWeight = weightNum - 15;
-      const maxWeight = weightNum + 15;
-      query = query.gte("weight", minWeight).lte("weight", maxWeight);
-    }
-
-    if (name) {
-      query = query.or(`first_name.ilike.%${name}%,last_name.ilike.%${name}%`);
-    }
-
-    query = query
-      .order("created_at", { ascending: false })
-      .range(offset, offset + limit - 1);
-
-    const { data, error } = await query;
+    const { data, error } = await supabase.rpc("get_users_with_coords", {
+      p_current_user_id: currentUserId,
+      p_limit: limit,
+      p_offset: offset,
+      p_belt: belt || null,
+      p_gender: gender || null,
+      p_age: age ? parseInt(age, 10) : null,
+      p_weight: weight ? parseInt(weight, 10) : null,
+      p_name: name || null,
+    });
 
     if (error) {
       console.error("Supabase error fetching users:", error);
@@ -256,21 +242,44 @@ router.get("/users", verifyToken, async (req, res) => {
 
 // Get single user
 router.get("/users/:userId", verifyToken, async (req, res) => {
-  const { userId } = req.params;
+  try {
+    const { userId } = req.params;
 
-  const { data, error } = await supabase
-    .from("users")
-    .select(
-      "id, first_name, last_name, email, avatar_url, primary_gym, gender, age, weight, belt, stripes, height, style_preference, competition_experience, bjj_start_year, city, location, dob, is_instructor",
-    )
-    .eq("id", userId)
-    .single();
+    const { data, error } = await supabase
+      .from("users")
+      .select(
+        "id, first_name, last_name, email, avatar_url, primary_gym, gender, age, weight, belt, stripes, height, style_preference, competition_experience, bjj_start_year, city, location, dob, is_instructor, belt_verified",
+      )
+      .eq("id", userId)
+      .single();
 
-  if (error) {
-    return res.status(404).json({ error: "User not found" });
+    if (error) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Extract coordinates from PostGIS geometry using the function
+    if (data.location) {
+      const { data: coords, error: coordError } = await supabase.rpc(
+        "get_coordinates",
+        {
+          geom: data.location,
+        },
+      );
+
+      if (!coordError && coords) {
+        data.latitude = coords.lat;
+        data.longitude = coords.lng;
+      }
+    }
+
+    res.json(data);
+  } catch (error) {
+    console.error("Error fetching user:", error);
+    res.status(500).json({
+      error: "Failed to fetch user",
+      message: error.message,
+    });
   }
-
-  res.json(data);
 });
 
 // Get user profile
@@ -286,6 +295,22 @@ router.get("/user-profile", verifyToken, async (req, res, next) => {
       .single();
 
     if (error) throw error;
+
+    // Extract coordinates from PostGIS geometry if location exists
+    if (data && data.location) {
+      const { data: coords, error: coordError } = await supabase.rpc(
+        "get_coordinates",
+        {
+          geom: data.location,
+        },
+      );
+
+      if (!coordError && coords) {
+        data.latitude = coords.lat;
+        data.longitude = coords.lng;
+      }
+    }
+
     res.status(200).json(data);
   } catch (error) {
     next(error);
@@ -297,6 +322,7 @@ router.post("/update-profile", verifyToken, async (req, res) => {
   try {
     const userId = req.user.uid;
     const updateData = req.body;
+
     console.log("Updating profile for user:", userId);
     console.log("Update data:", updateData);
 
@@ -318,8 +344,8 @@ router.post("/update-profile", verifyToken, async (req, res) => {
     if (updateData.avatar_url !== undefined)
       updates.avatar_url = updateData.avatar_url;
     if (updateData.is_instructor !== undefined)
-      // ← ADD THIS LINE
-      updates.is_instructor = updateData.is_instructor; // ← ADD THIS LINE
+      updates.is_instructor = updateData.is_instructor;
+
     if (updateData.location && updateData.location.lng !== undefined) {
       updates.location = `POINT(${updateData.location.lng} ${updateData.location.lat})`;
       if (updateData.location.city) updates.city = updateData.location.city;
@@ -387,6 +413,7 @@ router.post("/deleteUser", verifyToken, async (req, res, next) => {
       .select();
 
     if (error) throw error;
+
     console.log("DELETE USER DATA ", data);
     res.status(200).json({ message: "Deleted user successfully", data });
   } catch (error) {
