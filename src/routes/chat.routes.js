@@ -4,16 +4,16 @@ const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { chatImageUpload } = require("../middleware/upload");
 
-// Send chat message
+// Send chat message with multiple images (up to 5)
 router.post(
   "/chat-messages",
   verifyToken,
-  chatImageUpload.single("image"),
+  chatImageUpload.array("images", 5), // Accept up to 5 images
   async (req, res) => {
     try {
       const rollRequestId = parseInt(req.body.chatId, 10);
       const message = req.body.message || "";
-      const imageFile = req.file;
+      const imageFiles = req.files; // Array of files
 
       if (isNaN(rollRequestId)) {
         return res.status(400).json({ error: "Invalid chat ID" });
@@ -22,7 +22,7 @@ router.post(
       console.log("Received message:", {
         rollRequestId,
         messageLength: message.length,
-        hasImage: !!imageFile,
+        imageCount: imageFiles ? imageFiles.length : 0,
       });
 
       let { data: chatData, error: chatError } = await supabase
@@ -49,40 +49,52 @@ router.post(
         }
       }
 
-      let imageUrl = null;
+      // Upload all images to storage
+      let imageUrls = [];
+      if (imageFiles && imageFiles.length > 0) {
+        for (const imageFile of imageFiles) {
+          const fileExt = imageFile.originalname.split(".").pop();
+          const fileName = `${req.user.uid}-${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+          const filePath = `chat-images/${fileName}`;
 
-      if (imageFile) {
-        const fileExt = imageFile.originalname.split(".").pop();
-        const fileName = `${req.user.uid}-${Date.now()}.${fileExt}`;
-        const filePath = `chat-images/${fileName}`;
+          const { error: uploadError } = await supabase.storage
+            .from("chat-attachments")
+            .upload(filePath, imageFile.buffer, {
+              contentType: imageFile.mimetype,
+              upsert: false,
+            });
 
-        const { data: uploadData, error: uploadError } = await supabase.storage
-          .from("chat-attachments")
-          .upload(filePath, imageFile.buffer, {
-            contentType: imageFile.mimetype,
-            upsert: false,
-          });
+          if (uploadError) {
+            console.error("Error uploading image:", uploadError);
+            // Clean up already uploaded images
+            for (const url of imageUrls) {
+              const path = url.split("/chat-attachments/")[1];
+              await supabase.storage.from("chat-attachments").remove([path]);
+            }
+            return res.status(500).json({
+              error: "Failed to upload image",
+              message: uploadError.message,
+            });
+          }
 
-        if (uploadError) {
-          console.error("Error uploading image:", uploadError);
-          return res.status(500).json({ error: "Failed to upload image" });
+          const { data: urlData } = supabase.storage
+            .from("chat-attachments")
+            .getPublicUrl(filePath);
+
+          imageUrls.push(urlData.publicUrl);
         }
-
-        const { data: urlData } = supabase.storage
-          .from("chat-attachments")
-          .getPublicUrl(filePath);
-
-        imageUrl = urlData.publicUrl;
-        console.log("Image uploaded:", imageUrl);
+        console.log(`Uploaded ${imageUrls.length} images`);
       }
 
+      // Insert message with image URLs
       const { data, error } = await supabase
         .from("chat_messages")
         .insert({
           chat_id: chatData.id,
           sender_id: req.user.uid,
           message: message,
-          image_url: imageUrl,
+          image_url: imageUrls.length > 0 ? imageUrls[0] : null, // First image for backward compatibility
+          image_urls: imageUrls.length > 0 ? imageUrls : null, // All images as array
           created_at: new Date().toISOString(),
         })
         .select(
@@ -93,6 +105,7 @@ router.post(
 
       if (error) throw error;
 
+      // Update chat's last message timestamp
       await supabase
         .from("chats")
         .update({ last_message_at: new Date().toISOString() })
