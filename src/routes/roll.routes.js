@@ -128,9 +128,11 @@ router.post(
       const { data: request, error: fetchError } = await supabase
         .from("roll_requests")
         .select(
-          `*,
+          `
+        *,
         sender:users!sender_id(*),
-        receiver:users!receiver_id(*)`,
+        receiver:users!receiver_id(*)
+      `,
         )
         .eq("id", requestId)
         .single();
@@ -166,9 +168,11 @@ router.post(
         })
         .eq("id", requestId)
         .select(
-          `*,
+          `
+        *,
         sender:users!sender_id(*),
-        receiver:users!receiver_id(*)`,
+        receiver:users!receiver_id(*)
+      `,
         )
         .single();
 
@@ -178,6 +182,54 @@ router.post(
           error: "Failed to update roll request status",
           details: error,
         });
+      }
+
+      // ✅ INCREMENT FRIENDS COUNT WHEN REQUEST IS ACCEPTED
+      if (status === "accepted") {
+        try {
+          console.log("Incrementing friends count for both users...");
+
+          // Increment sender's friends count
+          const { error: senderError } = await supabase.rpc(
+            "increment_friends_count",
+            { user_id: request.sender_id },
+          );
+
+          if (senderError) {
+            console.warn(
+              "Failed to increment sender friends count:",
+              senderError,
+            );
+          }
+
+          // Increment receiver's friends count
+          const { error: receiverError } = await supabase.rpc(
+            "increment_friends_count",
+            { user_id: request.receiver_id },
+          );
+
+          if (receiverError) {
+            console.warn(
+              "Failed to increment receiver friends count:",
+              receiverError,
+            );
+          }
+
+          console.log("Friends count updated successfully for both users");
+
+          // Send notification to sender that request was accepted
+          try {
+            await sendNotification(
+              request.sender.id,
+              `${request.receiver.first_name} accepted your friend request!`,
+            );
+          } catch (notificationError) {
+            console.warn("Notification error:", notificationError);
+          }
+        } catch (countError) {
+          console.error("Error updating friends count:", countError);
+          // Don't fail the request if count update fails
+        }
       }
 
       if (status === "declined") {

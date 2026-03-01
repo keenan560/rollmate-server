@@ -637,6 +637,64 @@ router.post("/posts/:postId/comments", verifyToken, async (req, res) => {
   }
 });
 
+// Update/Edit post
+router.put("/posts/:postId", verifyToken, async (req, res) => {
+  try {
+    const currentUserId = req.user.uid;
+    const { postId } = req.params;
+    const { content } = req.body;
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({ error: "Post content is required" });
+    }
+
+    console.log(`User ${currentUserId} editing post ${postId}`);
+
+    // Update the post (only allow editing own posts)
+    const { data, error } = await supabase
+      .from("posts")
+      .update({
+        content: content.trim(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", postId)
+      .eq("user_id", currentUserId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error updating post:", error);
+      return res.status(500).json({
+        error: "Failed to update post",
+        message: error.message,
+      });
+    }
+
+    if (!data) {
+      return res.status(404).json({ error: "Post not found or unauthorized" });
+    }
+
+    // Fetch complete post with details using dedicated function
+    const { data: completePostArray } = await supabase.rpc(
+      "get_single_post_with_details",
+      {
+        p_post_id: postId,
+        p_current_user_id: currentUserId,
+      },
+    );
+
+    const completePost = completePostArray?.[0];
+
+    res.json(completePost || data);
+  } catch (error) {
+    console.error("Error in /posts/:postId PUT endpoint:", error);
+    res.status(500).json({
+      error: "Failed to update post",
+      message: error.message,
+    });
+  }
+});
+
 // Delete post
 router.delete("/posts/:postId", verifyToken, async (req, res) => {
   try {
