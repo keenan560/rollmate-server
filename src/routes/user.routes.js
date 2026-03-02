@@ -402,6 +402,53 @@ router.put("/profile/playing-style", verifyToken, async (req, res) => {
   }
 });
 
+// Toggle available now status
+router.post("/users/available-now", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { available_now } = req.body;
+
+    // Validate input
+    if (typeof available_now !== "boolean") {
+      return res.status(400).json({
+        error: "available_now must be a boolean value",
+      });
+    }
+
+    console.log(`User ${userId} setting available_now to ${available_now}`);
+
+    // Update user's availability status
+    const { data, error } = await supabase
+      .from("users")
+      .update({ available_now })
+      .eq("id", userId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error updating availability:", error);
+      return res.status(500).json({
+        error: "Failed to update availability",
+        message: error.message,
+      });
+    }
+
+    res.json({
+      success: true,
+      available_now,
+      message: available_now
+        ? "You are now showing as available"
+        : "You are no longer showing as available",
+    });
+  } catch (error) {
+    console.error("Error updating availability:", error);
+    res.status(500).json({
+      error: "Failed to update availability",
+      message: error.message,
+    });
+  }
+});
+
 // Delete user
 router.post("/deleteUser", verifyToken, async (req, res, next) => {
   console.log("DELETE USER", req.user);

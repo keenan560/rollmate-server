@@ -4,6 +4,34 @@ const path = require("path");
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { postImageUpload, postVideoUpload } = require("../middleware/upload");
+const { generateLinkPreview } = require("../utils/linkPreview");
+
+// Get link preview
+router.post("/posts/link-preview", verifyToken, async (req, res) => {
+  try {
+    const { url } = req.body;
+
+    if (!url) {
+      return res.status(400).json({ error: "URL is required" });
+    }
+
+    console.log("Fetching link preview for:", url);
+
+    const preview = await generateLinkPreview(url);
+
+    if (!preview) {
+      return res.status(404).json({ error: "Could not generate preview" });
+    }
+
+    res.json(preview);
+  } catch (error) {
+    console.error("Error in /posts/link-preview endpoint:", error);
+    res.status(500).json({
+      error: "Failed to fetch link preview",
+      message: error.message,
+    });
+  }
+});
 
 // Get posts (Feed)
 router.get("/posts", verifyToken, async (req, res) => {
@@ -92,12 +120,16 @@ router.post("/posts", verifyToken, async (req, res) => {
 
     console.log("Creating text post for user:", currentUserId);
 
+    // Generate link preview if content has URLs
+    const linkPreview = await generateLinkPreview(content);
+
     const { data, error } = await supabase
       .from("posts")
       .insert({
         user_id: currentUserId,
         content: content.trim(),
         media_type: "none",
+        link_preview: linkPreview, // Store as JSONB
       })
       .select()
       .single();
@@ -463,6 +495,66 @@ router.post("/posts/youtube", verifyToken, async (req, res) => {
     console.error("Error in /posts/youtube endpoint:", error);
     res.status(500).json({
       error: "Failed to create post with YouTube video",
+      message: error.message,
+    });
+  }
+});
+
+// ============================================
+// GET SINGLE POST BY ID
+// ============================================
+router.get("/posts/:postId", verifyToken, async (req, res) => {
+  try {
+    const currentUserId = req.user.uid;
+    const { postId } = req.params;
+
+    if (!postId) {
+      return res.status(400).json({ error: "Post ID is required" });
+    }
+
+    console.log("Fetching post:", postId, "for user:", currentUserId);
+
+    // Try using the dedicated single post function first
+    const { data: singlePostData, error: singlePostError } = await supabase.rpc(
+      "get_single_post_with_details",
+      {
+        p_post_id: postId,
+        p_current_user_id: currentUserId,
+      },
+    );
+
+    // If the dedicated function exists and works, use it
+    if (!singlePostError && singlePostData && singlePostData.length > 0) {
+      return res.json(singlePostData[0]);
+    }
+
+    // Fallback: Fetch from general posts function
+    const { data, error } = await supabase.rpc("get_posts_with_details", {
+      p_limit: 1000,
+      p_offset: 0,
+      p_current_user_id: currentUserId,
+    });
+
+    if (error) {
+      console.error("Error fetching post:", error);
+      return res.status(500).json({
+        error: "Failed to fetch post",
+        message: error.message,
+      });
+    }
+
+    // Find the specific post from the results
+    const post = data?.find((p) => p.id === postId);
+
+    if (!post) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    res.json(post);
+  } catch (error) {
+    console.error("Error in /posts/:postId GET endpoint:", error);
+    res.status(500).json({
+      error: "Failed to fetch post",
       message: error.message,
     });
   }

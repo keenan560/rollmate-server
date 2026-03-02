@@ -3,6 +3,34 @@ const router = express.Router();
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { chatImageUpload } = require("../middleware/upload");
+const { generateLinkPreview } = require("../utils/linkPreview");
+
+// Get link preview for chat
+router.post("/chat/link-preview", verifyToken, async (req, res) => {
+  try {
+    const { url } = req.body;
+
+    if (!url) {
+      return res.status(400).json({ error: "URL is required" });
+    }
+
+    console.log("Fetching chat link preview for:", url);
+
+    const preview = await generateLinkPreview(url);
+
+    if (!preview) {
+      return res.status(404).json({ error: "Could not generate preview" });
+    }
+
+    res.json(preview);
+  } catch (error) {
+    console.error("Error in /chat/link-preview endpoint:", error);
+    res.status(500).json({
+      error: "Failed to fetch link preview",
+      message: error.message,
+    });
+  }
+});
 
 // Send chat message with multiple images (up to 5)
 router.post(
@@ -95,6 +123,7 @@ router.post(
           message: message,
           image_url: imageUrls.length > 0 ? imageUrls[0] : null, // First image for backward compatibility
           image_urls: imageUrls.length > 0 ? imageUrls : null, // All images as array
+          link_preview: message ? await generateLinkPreview(message) : null, // Generate link preview
           created_at: new Date().toISOString(),
         })
         .select(
