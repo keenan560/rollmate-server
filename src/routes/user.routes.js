@@ -452,18 +452,161 @@ router.post("/users/available-now", verifyToken, async (req, res) => {
 // Delete user
 router.post("/deleteUser", verifyToken, async (req, res, next) => {
   console.log("DELETE USER", req.user);
+  const userId = req.user.uid;
+
   try {
+    // Delete in order to respect foreign key constraints
+    console.log(`Starting deletion process for user: ${userId}`);
+
+    // 1. Delete chat messages sent by user
+    const { error: chatMessagesError } = await supabase
+      .from("chat_messages")
+      .delete()
+      .eq("sender_id", userId);
+    if (chatMessagesError) throw chatMessagesError;
+    console.log("Deleted chat messages");
+
+    // 2. Delete chats where user is involved (via roll_requests)
+    // First get all roll requests involving this user
+    const { data: userRollRequests } = await supabase
+      .from("roll_requests")
+      .select("id")
+      .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`);
+
+    if (userRollRequests && userRollRequests.length > 0) {
+      const rollRequestIds = userRollRequests.map((rr) => rr.id);
+      // Delete chats associated with these roll requests
+      const { error: chatsError } = await supabase
+        .from("chats")
+        .delete()
+        .in("roll_request_id", rollRequestIds);
+      if (chatsError) throw chatsError;
+      console.log("Deleted chats");
+    }
+
+    // 3. Delete roll requests
+    const { error: rollRequestsError } = await supabase
+      .from("roll_requests")
+      .delete()
+      .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`);
+    if (rollRequestsError) throw rollRequestsError;
+    console.log("Deleted roll requests");
+
+    // 4. Delete post-related data
+    const { error: postCommentsError } = await supabase
+      .from("post_comments")
+      .delete()
+      .eq("user_id", userId);
+    if (postCommentsError) throw postCommentsError;
+
+    const { error: postLikesError } = await supabase
+      .from("post_likes")
+      .delete()
+      .eq("user_id", userId);
+    if (postLikesError) throw postLikesError;
+
+    const { error: photoLikesError } = await supabase
+      .from("photo_likes")
+      .delete()
+      .eq("user_id", userId);
+    if (photoLikesError) throw photoLikesError;
+
+    const { error: hiddenPostsError } = await supabase
+      .from("hidden_posts")
+      .delete()
+      .eq("user_id", userId);
+    if (hiddenPostsError) throw hiddenPostsError;
+
+    const { error: postReportsError } = await supabase
+      .from("post_reports")
+      .delete()
+      .eq("reported_by", userId);
+    if (postReportsError) throw postReportsError;
+
+    const { error: postsError } = await supabase
+      .from("posts")
+      .delete()
+      .eq("user_id", userId);
+    if (postsError) throw postsError;
+    console.log("Deleted posts and related data");
+
+    // 5. Delete achievement-related data
+    const { error: achievementEndorsementsError } = await supabase
+      .from("achievement_endorsements")
+      .delete()
+      .eq("endorser_user_id", userId);
+    if (achievementEndorsementsError) throw achievementEndorsementsError;
+
+    const { error: achievementVerificationsError } = await supabase
+      .from("achievement_verifications")
+      .delete()
+      .eq("verifier_user_id", userId);
+    if (achievementVerificationsError) throw achievementVerificationsError;
+
+    const { error: achievementsError } = await supabase
+      .from("achievements")
+      .delete()
+      .eq("user_id", userId);
+    if (achievementsError) throw achievementsError;
+    console.log("Deleted achievements and related data");
+
+    // 6. Delete belt-related data
+    const { error: beltEndorsementsError1 } = await supabase
+      .from("belt_endorsements")
+      .delete()
+      .eq("user_id", userId);
+    if (beltEndorsementsError1) throw beltEndorsementsError1;
+
+    const { error: beltEndorsementsError2 } = await supabase
+      .from("belt_endorsements")
+      .delete()
+      .eq("endorser_user_id", userId);
+    if (beltEndorsementsError2) throw beltEndorsementsError2;
+
+    const { error: beltVerificationEndorsementsError } = await supabase
+      .from("belt_verification_endorsements")
+      .delete()
+      .eq("endorser_user_id", userId);
+    if (beltVerificationEndorsementsError)
+      throw beltVerificationEndorsementsError;
+
+    const { error: beltVerificationsError1 } = await supabase
+      .from("belt_verifications")
+      .delete()
+      .eq("user_id", userId);
+    if (beltVerificationsError1) throw beltVerificationsError1;
+
+    const { error: beltVerificationsError2 } = await supabase
+      .from("belt_verifications")
+      .delete()
+      .eq("verifier_user_id", userId);
+    if (beltVerificationsError2) throw beltVerificationsError2;
+    console.log("Deleted belt verifications and endorsements");
+
+    // 7. Delete availability
+    const { error: availabilityError } = await supabase
+      .from("availability")
+      .delete()
+      .eq("user_id", userId);
+    if (availabilityError) throw availabilityError;
+    console.log("Deleted availability");
+
+    // 8. Finally, delete the user
     const { data, error } = await supabase
       .from("users")
       .delete()
-      .eq("id", req.user.uid)
+      .eq("id", userId)
       .select();
 
     if (error) throw error;
 
     console.log("DELETE USER DATA ", data);
-    res.status(200).json({ message: "Deleted user successfully", data });
+    res.status(200).json({
+      message: "Deleted user and all associated data successfully",
+      data,
+    });
   } catch (error) {
+    console.error("Error deleting user:", error);
     next(error);
   }
 });

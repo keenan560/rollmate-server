@@ -31,7 +31,12 @@ const fetchLinkPreview = async (url) => {
       siteName: data.siteName,
     };
   } catch (error) {
-    console.error("Error fetching link preview:", error);
+    // Only log non-DNS errors to reduce noise
+    if (error.code !== "ENOTFOUND" && error.cause?.code !== "ENOTFOUND") {
+      console.error("Error fetching link preview:", error.message);
+    } else {
+      console.log(`Link preview skipped (unreachable): ${url}`);
+    }
     return null;
   }
 };
