@@ -87,66 +87,63 @@ router.post(
       const user1 = rollRequest.sender_id;
       const user2 = rollRequest.receiver_id;
 
-      // Check if there's already a chat for THIS roll request
-      let { data: chatData, error: chatError } = await supabase
-        .from("chats")
+      console.log(
+        `Looking for chat between users: ${user1} and ${user2} (from roll_request ${rollRequestId})`,
+      );
+
+      // ALWAYS check for ANY existing chat between these two users first
+      // Find all accepted roll requests between these two users
+      const { data: allFriendships, error: friendshipError } = await supabase
+        .from("roll_requests")
         .select("id")
-        .eq("roll_request_id", rollRequestId)
-        .single();
+        .eq("status", "accepted")
+        .or(
+          `and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`,
+        )
+        .order("created_at", { ascending: true }); // Get oldest first
 
-      // If no chat for this specific request, check for ANY existing chat between these users
-      if (chatError && chatError.code === "PGRST116") {
+      let chatData = null;
+
+      if (!friendshipError && allFriendships && allFriendships.length > 0) {
         console.log(
-          "No chat for this roll request, checking for existing chat between users",
+          `Found ${allFriendships.length} accepted roll requests between these users`,
         );
+        // Check if any of these friendships have a chat
+        for (const friendship of allFriendships) {
+          const { data: existingChat, error: existingChatError } =
+            await supabase
+              .from("chats")
+              .select("id, roll_request_id")
+              .eq("roll_request_id", friendship.id)
+              .single();
 
-        // Find all accepted roll requests between these two users
-        const { data: allFriendships, error: friendshipError } = await supabase
-          .from("roll_requests")
-          .select("id")
-          .eq("status", "accepted")
-          .or(
-            `and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`,
-          )
-          .order("created_at", { ascending: true }); // Get oldest first
-
-        if (!friendshipError && allFriendships && allFriendships.length > 0) {
-          // Check if any of these friendships have a chat
-          for (const friendship of allFriendships) {
-            const { data: existingChat, error: existingChatError } =
-              await supabase
-                .from("chats")
-                .select("id")
-                .eq("roll_request_id", friendship.id)
-                .single();
-
-            if (existingChat && !existingChatError) {
-              console.log(
-                `Found existing chat ${existingChat.id} from roll request ${friendship.id}`,
-              );
-              chatData = existingChat;
-              break;
-            }
+          if (existingChat && !existingChatError) {
+            console.log(
+              `Found existing chat ${existingChat.id} from roll request ${friendship.id}`,
+            );
+            chatData = existingChat;
+            break;
           }
         }
+      }
 
-        // If still no chat found, create a new one
-        if (!chatData) {
-          console.log("Creating new chat for roll request:", rollRequestId);
-          const { data: newChat, error: createError } = await supabase
-            .from("chats")
-            .insert({
-              roll_request_id: rollRequestId,
-              created_at: new Date().toISOString(),
-            })
-            .select()
-            .single();
+      // If still no chat found, create a new one
+      if (!chatData) {
+        console.log(
+          "No existing chat found, creating new chat for roll request:",
+          rollRequestId,
+        );
+        const { data: newChat, error: createError } = await supabase
+          .from("chats")
+          .insert({
+            roll_request_id: rollRequestId,
+            created_at: new Date().toISOString(),
+          })
+          .select()
+          .single();
 
-          if (createError) throw createError;
-          chatData = newChat;
-        }
-      } else if (chatError) {
-        throw chatError;
+        if (createError) throw createError;
+        chatData = newChat;
       }
 
       console.log("Using chat for message:", chatData);
@@ -287,66 +284,62 @@ router.get("/chat-messages/:rollRequestId", verifyToken, async (req, res) => {
     const user1 = rollRequest.sender_id;
     const user2 = rollRequest.receiver_id;
 
-    // Check if there's already a chat for THIS roll request
-    let { data: chatData, error: chatError } = await supabase
-      .from("chats")
+    console.log(
+      `Looking for chat between users: ${user1} and ${user2} (from roll_request ${rollRequestId})`,
+    );
+
+    // ALWAYS check for ANY existing chat between these two users first
+    // Find all accepted roll requests between these two users
+    const { data: allFriendships, error: friendshipError } = await supabase
+      .from("roll_requests")
       .select("id")
-      .eq("roll_request_id", rollRequestId)
-      .single();
+      .eq("status", "accepted")
+      .or(
+        `and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`,
+      )
+      .order("created_at", { ascending: true }); // Get oldest first
 
-    // If no chat for this specific request, check for ANY existing chat between these users
-    if (chatError && chatError.code === "PGRST116") {
+    let chatData = null;
+
+    if (!friendshipError && allFriendships && allFriendships.length > 0) {
       console.log(
-        "No chat for this roll request, checking for existing chat between users",
+        `Found ${allFriendships.length} accepted roll requests between these users`,
       );
-
-      // Find all accepted roll requests between these two users
-      const { data: allFriendships, error: friendshipError } = await supabase
-        .from("roll_requests")
-        .select("id")
-        .eq("status", "accepted")
-        .or(
-          `and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`,
-        )
-        .order("created_at", { ascending: true }); // Get oldest first
-
-      if (!friendshipError && allFriendships && allFriendships.length > 0) {
-        // Check if any of these friendships have a chat
-        for (const friendship of allFriendships) {
-          const { data: existingChat, error: existingChatError } =
-            await supabase
-              .from("chats")
-              .select("id")
-              .eq("roll_request_id", friendship.id)
-              .single();
-
-          if (existingChat && !existingChatError) {
-            console.log(
-              `Found existing chat ${existingChat.id} from roll request ${friendship.id}`,
-            );
-            chatData = existingChat;
-            break;
-          }
-        }
-      }
-
-      // If still no chat found, create a new one
-      if (!chatData) {
-        console.log("Creating new chat for roll request:", rollRequestId);
-        const { data: newChat, error: createError } = await supabase
+      // Check if any of these friendships have a chat
+      for (const friendship of allFriendships) {
+        const { data: existingChat, error: existingChatError } = await supabase
           .from("chats")
-          .insert({
-            roll_request_id: rollRequestId,
-            created_at: new Date().toISOString(),
-          })
-          .select()
+          .select("id, roll_request_id")
+          .eq("roll_request_id", friendship.id)
           .single();
 
-        if (createError) throw createError;
-        chatData = newChat;
+        if (existingChat && !existingChatError) {
+          console.log(
+            `Found existing chat ${existingChat.id} from roll request ${friendship.id}`,
+          );
+          chatData = existingChat;
+          break;
+        }
       }
-    } else if (chatError) {
-      throw chatError;
+    }
+
+    // If still no chat found, create a new one
+    if (!chatData) {
+      console.log(
+        "No existing chat found, creating new chat for roll request:",
+        rollRequestId,
+      );
+      const { data: newChat, error: createError } = await supabase
+        .from("chats")
+        .insert({
+          roll_request_id: rollRequestId,
+          created_at: new Date().toISOString(),
+        })
+        .select()
+        .single();
+
+      if (createError) throw createError;
+      chatData = newChat;
     }
 
     console.log("Using chat:", chatData);
