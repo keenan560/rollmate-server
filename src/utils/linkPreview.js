@@ -31,11 +31,24 @@ const fetchLinkPreview = async (url) => {
       siteName: data.siteName,
     };
   } catch (error) {
-    // Only log non-DNS errors to reduce noise
-    if (error.code !== "ENOTFOUND" && error.cause?.code !== "ENOTFOUND") {
-      console.error("Error fetching link preview:", error.message);
-    } else {
+    // Silently skip common network errors (DNS, timeout, connection refused, etc.)
+    const skipCodes = [
+      "ENOTFOUND",
+      "ETIMEDOUT",
+      "ECONNREFUSED",
+      "ECONNRESET",
+      "EHOSTUNREACH",
+    ];
+    const errorCode = error.code || error.cause?.code;
+
+    if (
+      skipCodes.includes(errorCode) ||
+      error.message?.includes("fetch failed")
+    ) {
       console.log(`Link preview skipped (unreachable): ${url}`);
+    } else {
+      // Log unexpected errors for debugging
+      console.error(`Error fetching link preview for ${url}:`, error.message);
     }
     return null;
   }

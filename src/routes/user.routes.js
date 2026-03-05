@@ -19,8 +19,13 @@ router.get("/check-user", verifyToken, async (req, res, next) => {
       throw error;
     }
 
+    // If no data, user doesn't exist
+    if (!data) {
+      return res.status(200).json({ exists: false });
+    }
+
     // Extract coordinates from PostGIS geometry if location exists
-    if (data && data.location) {
+    if (data.location) {
       const { data: coords, error: coordError } = await supabase.rpc(
         "get_coordinates",
         {
@@ -34,7 +39,8 @@ router.get("/check-user", verifyToken, async (req, res, next) => {
       }
     }
 
-    res.status(200).json(data);
+    // Return user data with exists flag
+    res.status(200).json({ exists: true, ...data });
   } catch (error) {
     next(error);
   }
@@ -458,6 +464,80 @@ router.post("/deleteUser", verifyToken, async (req, res, next) => {
     // Delete in order to respect foreign key constraints
     console.log(`Starting deletion process for user: ${userId}`);
 
+    // 0. Get all user's posts to extract media URLs before deletion
+    const { data: userPosts } = await supabase
+      .from("posts")
+      .select("media_url, media_urls, media_type")
+      .eq("user_id", userId);
+
+    // Extract all media file paths from posts
+    const mediaFilesToDelete = [];
+    if (userPosts) {
+      for (const post of userPosts) {
+        if (post.media_url) {
+          // Extract file path from URL
+          if (
+            post.media_type === "image" &&
+            post.media_url.includes("/post-images/")
+          ) {
+            const filePath = post.media_url.split("/post-images/")[1];
+            mediaFilesToDelete.push({ bucket: "post-images", path: filePath });
+          } else if (
+            post.media_type === "video" &&
+            post.media_url.includes("/post-videos/")
+          ) {
+            const filePath = post.media_url.split("/post-videos/")[1];
+            mediaFilesToDelete.push({ bucket: "post-videos", path: filePath });
+          }
+        }
+        // Handle multiple images
+        if (post.media_urls && Array.isArray(post.media_urls)) {
+          for (const url of post.media_urls) {
+            if (url.includes("/post-images/")) {
+              const filePath = url.split("/post-images/")[1];
+              mediaFilesToDelete.push({
+                bucket: "post-images",
+                path: filePath,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Get user's profile picture
+    const { data: userData } = await supabase
+      .from("users")
+      .select("avatar_url")
+      .eq("id", userId)
+      .single();
+
+    if (
+      userData?.avatar_url &&
+      userData.avatar_url.includes("/profile-pics/")
+    ) {
+      const filePath = userData.avatar_url.split("/profile-pics/")[1];
+      mediaFilesToDelete.push({ bucket: "profile-pics", path: filePath });
+    }
+
+    // Get all chat images sent by user
+    const { data: chatMessages } = await supabase
+      .from("chat_messages")
+      .select("image_url")
+      .eq("sender_id", userId)
+      .not("image_url", "is", null);
+
+    if (chatMessages) {
+      for (const message of chatMessages) {
+        if (message.image_url && message.image_url.includes("/chat-images/")) {
+          const filePath = message.image_url.split("/chat-images/")[1];
+          mediaFilesToDelete.push({ bucket: "chat-images", path: filePath });
+        }
+      }
+    }
+
+    console.log(`Found ${mediaFilesToDelete.length} media files to delete`);
+
     // 1. Delete chat messages sent by user
     const { error: chatMessagesError } = await supabase
       .from("chat_messages")
@@ -600,10 +680,36 @@ router.post("/deleteUser", verifyToken, async (req, res, next) => {
 
     if (error) throw error;
 
+    // 9. Delete all media files from storage
+    let deletedFilesCount = 0;
+    for (const file of mediaFilesToDelete) {
+      try {
+        const { error: storageError } = await supabase.storage
+          .from(file.bucket)
+          .remove([file.path]);
+
+        if (!storageError) {
+          deletedFilesCount++;
+        } else {
+          console.error(
+            `Failed to delete ${file.bucket}/${file.path}:`,
+            storageError.message,
+          );
+        }
+      } catch (storageErr) {
+        console.error(
+          `Error deleting file ${file.bucket}/${file.path}:`,
+          storageErr,
+        );
+      }
+    }
+    console.log(`Deleted ${deletedFilesCount} media files from storage`);
+
     console.log("DELETE USER DATA ", data);
     res.status(200).json({
       message: "Deleted user and all associated data successfully",
       data,
+      deletedMediaFiles: deletedFilesCount,
     });
   } catch (error) {
     console.error("Error deleting user:", error);

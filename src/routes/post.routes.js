@@ -795,6 +795,48 @@ router.delete("/posts/:postId", verifyToken, async (req, res) => {
 
     console.log(`User ${currentUserId} deleting post ${postId}`);
 
+    // First, fetch the post to get media URLs
+    const { data: post, error: fetchError } = await supabase
+      .from("posts")
+      .select("media_url, media_urls, media_type, user_id")
+      .eq("id", postId)
+      .eq("user_id", currentUserId)
+      .single();
+
+    if (fetchError || !post) {
+      return res.status(404).json({ error: "Post not found or unauthorized" });
+    }
+
+    // Collect media files to delete
+    const mediaFilesToDelete = [];
+
+    if (post.media_url) {
+      if (
+        post.media_type === "image" &&
+        post.media_url.includes("/post-images/")
+      ) {
+        const filePath = post.media_url.split("/post-images/")[1];
+        mediaFilesToDelete.push({ bucket: "post-images", path: filePath });
+      } else if (
+        post.media_type === "video" &&
+        post.media_url.includes("/post-videos/")
+      ) {
+        const filePath = post.media_url.split("/post-videos/")[1];
+        mediaFilesToDelete.push({ bucket: "post-videos", path: filePath });
+      }
+    }
+
+    // Handle multiple images
+    if (post.media_urls && Array.isArray(post.media_urls)) {
+      for (const url of post.media_urls) {
+        if (url.includes("/post-images/")) {
+          const filePath = url.split("/post-images/")[1];
+          mediaFilesToDelete.push({ bucket: "post-images", path: filePath });
+        }
+      }
+    }
+
+    // Soft delete the post
     const { data, error } = await supabase
       .from("posts")
       .update({ is_deleted: true })
@@ -811,11 +853,37 @@ router.delete("/posts/:postId", verifyToken, async (req, res) => {
       });
     }
 
-    if (!data) {
-      return res.status(404).json({ error: "Post not found or unauthorized" });
+    // Delete media files from storage
+    let deletedFilesCount = 0;
+    for (const file of mediaFilesToDelete) {
+      try {
+        const { error: storageError } = await supabase.storage
+          .from(file.bucket)
+          .remove([file.path]);
+
+        if (!storageError) {
+          deletedFilesCount++;
+        } else {
+          console.error(
+            `Failed to delete ${file.bucket}/${file.path}:`,
+            storageError.message,
+          );
+        }
+      } catch (storageErr) {
+        console.error(
+          `Error deleting file ${file.bucket}/${file.path}:`,
+          storageErr,
+        );
+      }
     }
 
-    res.json({ success: true, message: "Post deleted successfully" });
+    console.log(`Deleted ${deletedFilesCount} media files from storage`);
+
+    res.json({
+      success: true,
+      message: "Post deleted successfully",
+      deletedMediaFiles: deletedFilesCount,
+    });
   } catch (error) {
     console.error("Error in /posts/:postId DELETE endpoint:", error);
     res.status(500).json({
