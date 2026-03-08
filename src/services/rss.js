@@ -95,22 +95,38 @@ async function fetchRSSFeed(feedUrl) {
   }
 }
 
-// Check if article already posted
-async function isArticlePosted(articleUrl) {
-  const { data, error } = await supabase
+// Check if article already posted (improved duplicate detection)
+async function isArticlePosted(articleUrl, articleTitle) {
+  // Check by URL first (most reliable)
+  const { data: urlMatch, error: urlError } = await supabase
     .from("posts")
     .select("id")
     .eq("user_id", "bjj-news-bot")
     .ilike("content", `%${articleUrl}%`)
-    .single();
+    .limit(1);
 
-  return !!data;
+  if (urlMatch && urlMatch.length > 0) {
+    return true;
+  }
+
+  // Also check by title to catch duplicates with different URLs
+  // Escape special characters in title for SQL LIKE
+  const escapedTitle = articleTitle.replace(/[%_]/g, "\\$&").substring(0, 100);
+
+  const { data: titleMatch, error: titleError } = await supabase
+    .from("posts")
+    .select("id")
+    .eq("user_id", "bjj-news-bot")
+    .ilike("content", `${escapedTitle}%`)
+    .limit(1);
+
+  return titleMatch && titleMatch.length > 0;
 }
 
 // Create post from RSS article
 async function createNewsPost(article, sourceName) {
   try {
-    if (await isArticlePosted(article.link)) {
+    if (await isArticlePosted(article.link, article.title)) {
       console.log(`Article already posted: ${article.title}`);
       return null;
     }
@@ -174,4 +190,66 @@ async function fetchAndPostBJJNews() {
   return totalPosts;
 }
 
-module.exports = { fetchAndPostBJJNews };
+// Clean up duplicate posts (for development/maintenance)
+async function cleanupDuplicatePosts() {
+  console.log("Cleaning up duplicate BJJ news posts...");
+
+  try {
+    // Get all news posts
+    const { data: posts, error } = await supabase
+      .from("posts")
+      .select("id, content, created_at")
+      .eq("user_id", "bjj-news-bot")
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    console.log(`Found ${posts.length} total news posts`);
+
+    // Track seen URLs and titles
+    const seenUrls = new Set();
+    const seenTitles = new Set();
+    const duplicateIds = [];
+
+    for (const post of posts) {
+      // Extract URL from content
+      const urlMatch = post.content.match(/Read more: (https?:\/\/[^\s\n]+)/);
+      const url = urlMatch ? urlMatch[1] : null;
+
+      // Extract title (first line)
+      const title = post.content.split("\n")[0].trim();
+
+      // Check if we've seen this URL or title before
+      if ((url && seenUrls.has(url)) || seenTitles.has(title)) {
+        duplicateIds.push(post.id);
+        console.log(`Duplicate found: ${title.substring(0, 50)}...`);
+      } else {
+        if (url) seenUrls.add(url);
+        seenTitles.add(title);
+      }
+    }
+
+    // Delete duplicates in batches
+    if (duplicateIds.length > 0) {
+      console.log(`Deleting ${duplicateIds.length} duplicate posts...`);
+
+      const { error: deleteError } = await supabase
+        .from("posts")
+        .delete()
+        .in("id", duplicateIds);
+
+      if (deleteError) throw deleteError;
+
+      console.log(`Successfully deleted ${duplicateIds.length} duplicates`);
+    } else {
+      console.log("No duplicates found");
+    }
+
+    return duplicateIds.length;
+  } catch (error) {
+    console.error("Error cleaning up duplicates:", error);
+    return 0;
+  }
+}
+
+module.exports = { fetchAndPostBJJNews, cleanupDuplicatePosts };
