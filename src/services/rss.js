@@ -15,6 +15,46 @@ const RSS_FEEDS = [
     url: "https://www.bjjheroes.com/feed",
     avatar: "https://www.bjjheroes.com/favicon.ico",
   },
+  {
+    name: "Graciemag",
+    url: "https://graciemag.com/feed",
+    avatar: "https://graciemag.com/favicon.ico",
+  },
+  {
+    name: "Grapplearts",
+    url: "https://grapplearts.com/feed",
+    avatar: "https://grapplearts.com/favicon.ico",
+  },
+  {
+    name: "BJJ Eastern Europe",
+    url: "https://bjjee.com/feed",
+    avatar: "https://bjjee.com/favicon.ico",
+  },
+  {
+    name: "Jits Magazine",
+    url: "https://jitsmagazine.com/feed",
+    avatar: "https://jitsmagazine.com/favicon.ico",
+  },
+  {
+    name: "BJJ Fanatics",
+    url: "https://bjjfanatics.com/blogs/news.atom",
+    avatar: "https://bjjfanatics.com/favicon.ico",
+  },
+  {
+    name: "BJJ World",
+    url: "https://bjj-world.com/feed",
+    avatar: "https://bjj-world.com/favicon.ico",
+  },
+  {
+    name: "Chewjitsu",
+    url: "https://chewjitsu.net/feed",
+    avatar: "https://chewjitsu.net/favicon.ico",
+  },
+  {
+    name: "BJJ Globetrotters",
+    url: "https://bjjglobetrotters.com/feed",
+    avatar: "https://bjjglobetrotters.com/favicon.ico",
+  },
 ];
 
 // Create a system user for news posts (run once)

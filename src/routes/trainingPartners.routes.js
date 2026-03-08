@@ -20,10 +20,16 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
 
 // GET /training-partners
 // Returns users categorized by availability, gym membership, and proximity
+// Optional query params: city, zip_code, radius (default 50 miles)
 router.get("/training-partners", verifyToken, async (req, res) => {
   try {
     const userId = req.user.uid;
-    console.log("Fetching training partners for user:", userId);
+    const { city, zip_code, radius = 50 } = req.query;
+    console.log("Fetching training partners for user:", userId, {
+      city,
+      zip_code,
+      radius,
+    });
 
     // Get current user's data - extract lat/lng from PostGIS location
     const { data: currentUser, error: userError } = await supabase.rpc(
@@ -67,17 +73,27 @@ router.get("/training-partners", verifyToken, async (req, res) => {
       "Total users found (excluding current):",
       allUsers?.length || 0,
     );
-    console.log(
-      "Users with location:",
-      allUsers?.filter((u) => u.latitude && u.longitude).length || 0,
-    );
+
+    // Filter by location if specified
+    let filteredUsers = allUsers || [];
+    if (city) {
+      filteredUsers = filteredUsers.filter(
+        (u) => u.city && u.city.toLowerCase() === city.toLowerCase(),
+      );
+      console.log(`Filtered to ${filteredUsers.length} users in ${city}`);
+    } else if (zip_code) {
+      filteredUsers = filteredUsers.filter((u) => u.zip_code === zip_code);
+      console.log(
+        `Filtered to ${filteredUsers.length} users in zip ${zip_code}`,
+      );
+    }
 
     // Categorize users
     const availableNow = [];
     const gymMembers = [];
     const nearby = [];
 
-    (allUsers || []).forEach((user) => {
+    filteredUsers.forEach((user) => {
       // Calculate distance if both users have location
       let distance = null;
       if (userLat && userLng && user.latitude && user.longitude) {
@@ -86,15 +102,6 @@ router.get("/training-partners", verifyToken, async (req, res) => {
           userLng,
           user.latitude,
           user.longitude,
-        );
-        console.log(
-          `Distance to ${user.first_name} ${user.last_name}:`,
-          distance.toFixed(1),
-          "miles",
-        );
-      } else {
-        console.log(
-          `Skipping ${user.first_name} ${user.last_name} - missing location data`,
         );
       }
 
@@ -109,26 +116,23 @@ router.get("/training-partners", verifyToken, async (req, res) => {
         distance: distance,
         available_now: user.available_now,
         is_online: user.is_online,
+        city: user.city,
+        zip_code: user.zip_code,
       };
 
       // Available Now (users with available_now toggle)
       if (user.available_now) {
         availableNow.push(userWithDistance);
-        console.log(`Added ${user.first_name} to Available Now`);
       }
 
       // My Gym (users from same primary gym)
       if (userGym && user.primary_gym === userGym) {
         gymMembers.push(userWithDistance);
-        console.log(`Added ${user.first_name} to My Gym (${user.primary_gym})`);
       }
 
-      // Nearby (users within 50 miles)
-      if (distance !== null && distance <= 50) {
+      // Nearby (users within specified radius)
+      if (distance !== null && distance <= parseFloat(radius)) {
         nearby.push(userWithDistance);
-        console.log(
-          `Added ${user.first_name} to Nearby (${distance.toFixed(1)} mi)`,
-        );
       }
     });
 
@@ -158,5 +162,36 @@ router.get("/training-partners", verifyToken, async (req, res) => {
     });
   }
 });
+
+// GET /training-partners/search-locations
+// Typeahead search for cities and zip codes
+router.get(
+  "/training-partners/search-locations",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const { q } = req.query;
+
+      if (!q || q.length < 2) {
+        return res.json([]);
+      }
+
+      const { data, error } = await supabase.rpc("search_locations", {
+        search_query: q,
+        result_limit: 10,
+      });
+
+      if (error) {
+        console.error("Error searching locations:", error);
+        return res.status(500).json({ error: "Failed to search locations" });
+      }
+
+      res.json(data || []);
+    } catch (error) {
+      console.error("Error in location search:", error);
+      res.status(500).json({ error: "Failed to search locations" });
+    }
+  },
+);
 
 module.exports = router;

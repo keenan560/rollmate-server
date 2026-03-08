@@ -359,7 +359,10 @@ router.post(
 router.post(
   "/posts/video",
   verifyToken,
-  postVideoUpload.single("video"),
+  postVideoUpload.fields([
+    { name: "video", maxCount: 1 },
+    { name: "thumbnail", maxCount: 1 },
+  ]),
   async (req, res) => {
     try {
       const currentUserId = req.user.uid;
@@ -369,20 +372,24 @@ router.post(
         return res.status(400).json({ error: "Post content is required" });
       }
 
-      if (!req.file) {
+      if (!req.files || !req.files.video) {
         return res.status(400).json({ error: "Video file is required" });
       }
 
       console.log("Creating video post for user:", currentUserId);
 
-      const fileExt = path.extname(req.file.originalname);
-      const fileName = `${currentUserId}_${Date.now()}${fileExt}`;
-      const filePath = `${fileName}`;
+      const videoFile = req.files.video[0];
+      const thumbnailFile = req.files.thumbnail ? req.files.thumbnail[0] : null;
+
+      // Upload video
+      const videoExt = path.extname(videoFile.originalname);
+      const videoFileName = `${currentUserId}_${Date.now()}${videoExt}`;
+      const videoFilePath = `${videoFileName}`;
 
       const { data: uploadData, error: uploadError } = await supabase.storage
         .from("post-videos")
-        .upload(filePath, req.file.buffer, {
-          contentType: req.file.mimetype,
+        .upload(videoFilePath, videoFile.buffer, {
+          contentType: videoFile.mimetype,
           upsert: false,
         });
 
@@ -396,10 +403,40 @@ router.post(
 
       const { data: urlData } = supabase.storage
         .from("post-videos")
-        .getPublicUrl(filePath);
+        .getPublicUrl(videoFilePath);
 
       const videoUrl = urlData.publicUrl;
 
+      // Upload thumbnail if provided
+      let thumbnailUrl = null;
+      if (thumbnailFile) {
+        console.log("Uploading video thumbnail for user:", currentUserId);
+
+        const thumbnailFileName = `thumb_${currentUserId}_${Date.now()}.jpg`;
+        const thumbnailFilePath = `${thumbnailFileName}`;
+
+        const { data: thumbUploadData, error: thumbUploadError } =
+          await supabase.storage
+            .from("video-thumbnails")
+            .upload(thumbnailFilePath, thumbnailFile.buffer, {
+              contentType: "image/jpeg",
+              upsert: false,
+            });
+
+        if (thumbUploadError) {
+          console.error("Error uploading thumbnail:", thumbUploadError);
+          // Continue without thumbnail - not critical
+        } else {
+          const { data: thumbUrlData } = supabase.storage
+            .from("video-thumbnails")
+            .getPublicUrl(thumbnailFilePath);
+
+          thumbnailUrl = thumbUrlData.publicUrl;
+          console.log("Thumbnail uploaded successfully:", thumbnailUrl);
+        }
+      }
+
+      // Create post with video and thumbnail
       const { data, error } = await supabase
         .from("posts")
         .insert({
@@ -407,7 +444,7 @@ router.post(
           content: content.trim(),
           media_type: "video",
           media_url: videoUrl,
-          video_thumbnail_url: null,
+          video_thumbnail_url: thumbnailUrl,
         })
         .select()
         .single();
@@ -798,7 +835,7 @@ router.delete("/posts/:postId", verifyToken, async (req, res) => {
     // First, fetch the post to get media URLs
     const { data: post, error: fetchError } = await supabase
       .from("posts")
-      .select("media_url, media_urls, media_type, user_id")
+      .select("media_url, media_urls, media_type, video_thumbnail_url, user_id")
       .eq("id", postId)
       .eq("user_id", currentUserId)
       .single();
@@ -834,6 +871,15 @@ router.delete("/posts/:postId", verifyToken, async (req, res) => {
           mediaFilesToDelete.push({ bucket: "post-images", path: filePath });
         }
       }
+    }
+
+    // Handle video thumbnail
+    if (
+      post.video_thumbnail_url &&
+      post.video_thumbnail_url.includes("/video-thumbnails/")
+    ) {
+      const filePath = post.video_thumbnail_url.split("/video-thumbnails/")[1];
+      mediaFilesToDelete.push({ bucket: "video-thumbnails", path: filePath });
     }
 
     // Soft delete the post

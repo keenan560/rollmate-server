@@ -12,6 +12,7 @@ const beltVerificationRoutes = require("./beltVerification.routes");
 const beltEndorsementRoutes = require("./beltEndorsement.routes");
 const trainingPartnersRoutes = require("./trainingPartners.routes");
 const rollRequestsRoutes = require("./rollRequests.routes");
+const placesRoutes = require("./places.routes");
 
 // Mount routes
 router.use("/", authRoutes);
@@ -25,5 +26,6 @@ router.use("/", beltVerificationRoutes);
 router.use("/", beltEndorsementRoutes);
 router.use("/", trainingPartnersRoutes);
 router.use("/", rollRequestsRoutes);
+router.use("/", placesRoutes);
 
 module.exports = router;
