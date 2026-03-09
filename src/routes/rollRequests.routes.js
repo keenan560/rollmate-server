@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
+const { optimizeUserImages } = require("../utils/imageOptimization");
 
 // POST /roll-requests - Send a roll request
 router.post("/roll-requests", verifyToken, async (req, res) => {
@@ -71,7 +72,13 @@ router.get("/roll-requests", verifyToken, async (req, res) => {
       return res.status(500).json({ error: "Failed to fetch roll requests" });
     }
 
-    res.json({ requests: requests || [] });
+    // Optimize user avatars in requests
+    const optimizedRequests = (requests || []).map((request) => ({
+      ...request,
+      sender: request.sender ? optimizeUserImages(request.sender) : null,
+    }));
+
+    res.json({ requests: optimizedRequests });
   } catch (error) {
     console.error("Error fetching roll requests:", error);
     res.status(500).json({ error: "Failed to fetch roll requests" });

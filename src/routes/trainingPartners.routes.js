@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
+const { optimizeUserImages } = require("../utils/imageOptimization");
 
 // Haversine formula to calculate distance between two points
 function calculateDistance(lat1, lon1, lat2, lon2) {
@@ -30,6 +31,26 @@ router.get("/training-partners", verifyToken, async (req, res) => {
       zip_code,
       radius,
     });
+
+    // Get blocked user IDs
+    const { data: blockData } = await supabase
+      .from("blocked_users")
+      .select("blocked_user_id, user_id")
+      .or(`user_id.eq.${userId},blocked_user_id.eq.${userId}`);
+
+    const blockedIds = new Set();
+    if (blockData) {
+      blockData.forEach((block) => {
+        // Add users I blocked
+        if (block.user_id === userId) {
+          blockedIds.add(block.blocked_user_id);
+        }
+        // Add users who blocked me
+        if (block.blocked_user_id === userId) {
+          blockedIds.add(block.user_id);
+        }
+      });
+    }
 
     // Get current user's data - extract lat/lng from PostGIS location
     const { data: currentUser, error: userError } = await supabase.rpc(
@@ -74,8 +95,15 @@ router.get("/training-partners", verifyToken, async (req, res) => {
       allUsers?.length || 0,
     );
 
+    // Filter out blocked users
+    let filteredUsers = (allUsers || []).filter(
+      (user) => !blockedIds.has(user.id),
+    );
+    console.log(
+      `Filtered out ${(allUsers?.length || 0) - filteredUsers.length} blocked users`,
+    );
+
     // Filter by location if specified
-    let filteredUsers = allUsers || [];
     if (city) {
       filteredUsers = filteredUsers.filter(
         (u) => u.city && u.city.toLowerCase() === city.toLowerCase(),
@@ -149,10 +177,11 @@ router.get("/training-partners", verifyToken, async (req, res) => {
       `Found ${availableNow.length} available, ${gymMembers.length} gym members, ${nearby.length} nearby`,
     );
 
+    // Optimize images in all categories
     res.json({
-      availableNow,
-      gymMembers,
-      nearby,
+      availableNow: availableNow.map((user) => optimizeUserImages(user)),
+      gymMembers: gymMembers.map((user) => optimizeUserImages(user)),
+      nearby: nearby.map((user) => optimizeUserImages(user)),
     });
   } catch (error) {
     console.error("Error fetching training partners:", error);

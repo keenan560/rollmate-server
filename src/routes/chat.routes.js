@@ -4,6 +4,10 @@ const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { chatImageUpload } = require("../middleware/upload");
 const { generateLinkPreview } = require("../utils/linkPreview");
+const {
+  optimizeImageUrl,
+  optimizeUserImages,
+} = require("../utils/imageOptimization");
 
 // Get link preview for chat
 router.post("/chat/link-preview", verifyToken, async (req, res) => {
@@ -392,6 +396,17 @@ router.get("/chat-messages/:rollRequestId", verifyToken, async (req, res) => {
             // Return message with null reply_to if error
             return {
               ...message,
+              sender: message.sender
+                ? optimizeUserImages(message.sender)
+                : null,
+              image_url: message.image_url
+                ? optimizeImageUrl(message.image_url, "medium")
+                : null,
+              image_urls: message.image_urls
+                ? message.image_urls.map((url) =>
+                    optimizeImageUrl(url, "medium"),
+                  )
+                : null,
               reply_to: null,
             };
           }
@@ -403,12 +418,43 @@ router.get("/chat-messages/:rollRequestId", verifyToken, async (req, res) => {
             );
             return {
               ...message,
-              reply_to: repliedMessage,
+              sender: message.sender
+                ? optimizeUserImages(message.sender)
+                : null,
+              image_url: message.image_url
+                ? optimizeImageUrl(message.image_url, "medium")
+                : null,
+              image_urls: message.image_urls
+                ? message.image_urls.map((url) =>
+                    optimizeImageUrl(url, "medium"),
+                  )
+                : null,
+              reply_to: {
+                ...repliedMessage,
+                sender: repliedMessage.sender
+                  ? optimizeUserImages(repliedMessage.sender)
+                  : null,
+                image_url: repliedMessage.image_url
+                  ? optimizeImageUrl(repliedMessage.image_url, "medium")
+                  : null,
+                image_urls: repliedMessage.image_urls
+                  ? repliedMessage.image_urls.map((url) =>
+                      optimizeImageUrl(url, "medium"),
+                    )
+                  : null,
+              },
             };
           }
         }
         return {
           ...message,
+          sender: message.sender ? optimizeUserImages(message.sender) : null,
+          image_url: message.image_url
+            ? optimizeImageUrl(message.image_url, "medium")
+            : null,
+          image_urls: message.image_urls
+            ? message.image_urls.map((url) => optimizeImageUrl(url, "medium"))
+            : null,
           reply_to: null,
         };
       }),

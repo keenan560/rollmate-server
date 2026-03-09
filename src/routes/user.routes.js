@@ -4,6 +4,7 @@ const fs = require("fs");
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { profilePicUpload } = require("../middleware/upload");
+const { optimizeUserImages } = require("../utils/imageOptimization");
 
 // Check if user exists
 router.get("/check-user", verifyToken, async (req, res, next) => {
@@ -197,6 +198,22 @@ router.post("/register", verifyToken, async (req, res, next) => {
   }
 });
 
+// Helper function to get blocked user IDs
+async function getBlockedUserIds(userId) {
+  const { data, error } = await supabase
+    .from("blocked_users")
+    .select("blocked_user_id")
+    .or(`user_id.eq.${userId},blocked_user_id.eq.${userId}`);
+
+  if (error) {
+    console.error("Error fetching blocked users:", error);
+    return [];
+  }
+
+  // Return IDs of users who blocked me OR users I blocked
+  return data.map((b) => b.blocked_user_id);
+}
+
 // Get all users with filters
 router.get("/users", verifyToken, async (req, res) => {
   try {
@@ -215,6 +232,9 @@ router.get("/users", verifyToken, async (req, res) => {
       page,
       limit,
     });
+
+    // Get blocked user IDs
+    const blockedIds = await getBlockedUserIds(currentUserId);
 
     const { data, error } = await supabase.rpc("get_users_with_coords", {
       p_current_user_id: currentUserId,
@@ -235,8 +255,16 @@ router.get("/users", verifyToken, async (req, res) => {
       });
     }
 
-    console.log(`Fetched ${data.length} users for page ${page}`);
-    res.json(data);
+    // Filter out blocked users
+    const filteredData = data.filter((user) => !blockedIds.includes(user.id));
+
+    // Optimize images in all users
+    const optimizedUsers = filteredData.map((user) => optimizeUserImages(user));
+
+    console.log(
+      `Fetched ${optimizedUsers.length} users for page ${page} (${data.length - filteredData.length} blocked, optimized)`,
+    );
+    res.json(optimizedUsers);
   } catch (error) {
     console.error("Error fetching users:", error);
     res.status(500).json({
@@ -250,6 +278,22 @@ router.get("/users", verifyToken, async (req, res) => {
 router.get("/users/:userId", verifyToken, async (req, res) => {
   try {
     const { userId } = req.params;
+    const currentUserId = req.user.uid;
+
+    // Check if user is blocked
+    const { data: blockCheck } = await supabase
+      .from("blocked_users")
+      .select("id")
+      .or(`user_id.eq.${currentUserId},blocked_user_id.eq.${currentUserId}`)
+      .or(`user_id.eq.${userId},blocked_user_id.eq.${userId}`)
+      .limit(1);
+
+    if (blockCheck && blockCheck.length > 0) {
+      return res.status(403).json({
+        error: "User not accessible",
+        message: "This user is not available",
+      });
+    }
 
     const { data, error } = await supabase
       .from("users")
@@ -278,7 +322,9 @@ router.get("/users/:userId", verifyToken, async (req, res) => {
       }
     }
 
-    res.json(data);
+    // Optimize images
+    const optimizedUser = optimizeUserImages(data);
+    res.json(optimizedUser);
   } catch (error) {
     console.error("Error fetching user:", error);
     res.status(500).json({
@@ -811,5 +857,177 @@ router.post(
     }
   },
 );
+
+// Toggle online status
+router.post("/users/online-status", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { is_online } = req.body;
+
+    if (typeof is_online !== "boolean") {
+      return res.status(400).json({
+        error: "is_online must be a boolean value",
+      });
+    }
+
+    console.log(`User ${userId} setting is_online to ${is_online}`);
+
+    const { data, error } = await supabase
+      .from("users")
+      .update({ is_online })
+      .eq("id", userId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error updating online status:", error);
+      return res.status(500).json({
+        error: "Failed to update online status",
+        message: error.message,
+      });
+    }
+
+    res.json({
+      success: true,
+      is_online,
+      message: is_online
+        ? "You are now showing as online"
+        : "You are now showing as offline",
+    });
+  } catch (error) {
+    console.error("Error updating online status:", error);
+    res.status(500).json({
+      error: "Failed to update online status",
+      message: error.message,
+    });
+  }
+});
+
+// Get blocked users
+router.get("/blocked-users", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+
+    // Get list of blocked user IDs
+    const { data: blocks, error: blocksError } = await supabase
+      .from("blocked_users")
+      .select("blocked_user_id")
+      .eq("user_id", userId);
+
+    if (blocksError) throw blocksError;
+
+    if (!blocks || blocks.length === 0) {
+      return res.json([]);
+    }
+
+    const blockedUserIds = blocks.map((b) => b.blocked_user_id);
+
+    // Get user details for blocked users
+    const { data: users, error: usersError } = await supabase
+      .from("users")
+      .select("id, first_name, last_name, avatar_url, belt, primary_gym")
+      .in("id", blockedUserIds);
+
+    if (usersError) throw usersError;
+
+    // Optimize images in blocked users
+    const optimizedUsers = (users || []).map((user) =>
+      optimizeUserImages(user),
+    );
+
+    res.json(optimizedUsers);
+  } catch (error) {
+    console.error("Error fetching blocked users:", error);
+    res.status(500).json({
+      error: "Failed to fetch blocked users",
+      message: error.message,
+    });
+  }
+});
+
+// Block a user
+router.post("/block-user", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { blocked_user_id } = req.body;
+
+    if (!blocked_user_id) {
+      return res.status(400).json({
+        error: "blocked_user_id is required",
+      });
+    }
+
+    // Can't block yourself
+    if (blocked_user_id === userId) {
+      return res.status(400).json({
+        error: "You cannot block yourself",
+      });
+    }
+
+    // Insert block record
+    const { data, error } = await supabase
+      .from("blocked_users")
+      .insert({
+        user_id: userId,
+        blocked_user_id: blocked_user_id,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      // Handle duplicate block (already blocked)
+      if (error.code === "23505") {
+        return res.status(400).json({
+          error: "User is already blocked",
+        });
+      }
+      throw error;
+    }
+
+    res.json({
+      success: true,
+      message: "User blocked successfully",
+    });
+  } catch (error) {
+    console.error("Error blocking user:", error);
+    res.status(500).json({
+      error: "Failed to block user",
+      message: error.message,
+    });
+  }
+});
+
+// Unblock a user
+router.post("/unblock-user", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { blocked_user_id } = req.body;
+
+    if (!blocked_user_id) {
+      return res.status(400).json({
+        error: "blocked_user_id is required",
+      });
+    }
+
+    const { error } = await supabase
+      .from("blocked_users")
+      .delete()
+      .eq("user_id", userId)
+      .eq("blocked_user_id", blocked_user_id);
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      message: "User unblocked successfully",
+    });
+  } catch (error) {
+    console.error("Error unblocking user:", error);
+    res.status(500).json({
+      error: "Failed to unblock user",
+      message: error.message,
+    });
+  }
+});
 
 module.exports = router;

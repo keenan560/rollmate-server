@@ -5,6 +5,7 @@ const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { postImageUpload, postVideoUpload } = require("../middleware/upload");
 const { generateLinkPreview } = require("../utils/linkPreview");
+const { optimizePostImages } = require("../utils/imageOptimization");
 
 // Get link preview
 router.post("/posts/link-preview", verifyToken, async (req, res) => {
@@ -38,7 +39,7 @@ router.get("/posts", verifyToken, async (req, res) => {
   try {
     const currentUserId = req.user.uid;
     const page = parseInt(req.query.page, 10) || 1;
-    const limit = parseInt(req.query.limit, 10) || 30;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 15, 30); // Reduced default from 30 to 15, max 30
     const offset = (page - 1) * limit;
 
     console.log(`Fetching posts - page: ${page}, limit: ${limit}`);
@@ -57,8 +58,11 @@ router.get("/posts", verifyToken, async (req, res) => {
       });
     }
 
-    console.log(`Fetched ${data.length} posts`);
-    res.json(data);
+    // Optimize images in all posts
+    const optimizedPosts = data.map((post) => optimizePostImages(post));
+
+    console.log(`Fetched ${optimizedPosts.length} posts (optimized)`);
+    res.json(optimizedPosts);
   } catch (error) {
     console.error("Error in /posts endpoint:", error);
     res.status(500).json({
@@ -97,8 +101,13 @@ router.get("/posts/user/:userId", verifyToken, async (req, res) => {
       });
     }
 
-    console.log(`Found ${data.length} posts for user ${userId}`);
-    res.json(data);
+    // Optimize images in all posts
+    const optimizedPosts = data.map((post) => optimizePostImages(post));
+
+    console.log(
+      `Found ${optimizedPosts.length} posts for user ${userId} (optimized)`,
+    );
+    res.json(optimizedPosts);
   } catch (error) {
     console.error("Error in /posts/user/:userId endpoint:", error);
     res.status(500).json({
@@ -562,7 +571,8 @@ router.get("/posts/:postId", verifyToken, async (req, res) => {
 
     // If the dedicated function exists and works, use it
     if (!singlePostError && singlePostData && singlePostData.length > 0) {
-      return res.json(singlePostData[0]);
+      const optimizedPost = optimizePostImages(singlePostData[0]);
+      return res.json(optimizedPost);
     }
 
     // Fallback: Fetch from general posts function
@@ -587,7 +597,8 @@ router.get("/posts/:postId", verifyToken, async (req, res) => {
       return res.status(404).json({ error: "Post not found" });
     }
 
-    res.json(post);
+    const optimizedPost = optimizePostImages(post);
+    res.json(optimizedPost);
   } catch (error) {
     console.error("Error in /posts/:postId GET endpoint:", error);
     res.status(500).json({
