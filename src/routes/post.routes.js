@@ -43,11 +43,15 @@ router.get("/posts", verifyToken, async (req, res) => {
     const offset = (page - 1) * limit;
 
     console.log(`Fetching posts - page: ${page}, limit: ${limit}`);
+    const seventyTwoHoursAgo = new Date(
+      Date.now() - 72 * 60 * 60 * 1000,
+    ).toISOString();
 
     const { data, error } = await supabase.rpc("get_posts_with_details", {
       p_limit: limit,
       p_offset: offset,
       p_current_user_id: currentUserId,
+      p_since: seventyTwoHoursAgo,
     });
 
     if (error) {
