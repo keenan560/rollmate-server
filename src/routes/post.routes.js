@@ -284,6 +284,16 @@ router.post(
       }
 
       console.log(
+        "Files received:",
+        req.files.map((f) => ({
+          originalname: f.originalname,
+          mimetype: f.mimetype,
+          size: f.size,
+          fieldname: f.fieldname,
+        })),
+      );
+
+      console.log(
         `Creating post with ${req.files.length} images for user:`,
         currentUserId,
       );
@@ -291,7 +301,9 @@ router.post(
       // Upload all images to Supabase storage
       const imageUrls = [];
       for (const file of req.files) {
-        const fileExt = path.extname(file.originalname);
+        // originalname can be null from React Native FormData
+        const originalName = file.originalname || file.fieldname || "image.jpg";
+        const fileExt = path.extname(originalName) || ".jpg";
         const fileName = `${currentUserId}_${Date.now()}_${Math.random().toString(36).substring(7)}${fileExt}`;
         const filePath = `${fileName}`;
 
@@ -564,7 +576,7 @@ router.get("/posts/:postId", verifyToken, async (req, res) => {
 
     console.log("Fetching post:", postId, "for user:", currentUserId);
 
-    // Try using the dedicated single post function first
+    // Try the dedicated single post function first
     const { data: singlePostData, error: singlePostError } = await supabase.rpc(
       "get_single_post_with_details",
       {
@@ -573,35 +585,65 @@ router.get("/posts/:postId", verifyToken, async (req, res) => {
       },
     );
 
-    // If the dedicated function exists and works, use it
     if (!singlePostError && singlePostData && singlePostData.length > 0) {
       const optimizedPost = optimizePostImages(singlePostData[0]);
       return res.json(optimizedPost);
     }
 
-    // Fallback: Fetch from general posts function
-    const { data, error } = await supabase.rpc("get_posts_with_details", {
-      p_limit: 1000,
-      p_offset: 0,
-      p_current_user_id: currentUserId,
-    });
-
-    if (error) {
-      console.error("Error fetching post:", error);
-      return res.status(500).json({
-        error: "Failed to fetch post",
-        message: error.message,
-      });
+    // Log why the RPC failed so you can debug
+    if (singlePostError) {
+      console.error("get_single_post_with_details error:", singlePostError);
     }
 
-    // Find the specific post from the results
-    const post = data?.find((p) => p.id === postId);
+    // Fallback: fetch directly from posts table (no time filter, no feed restriction)
+    const { data: post, error: postError } = await supabase
+      .from("posts")
+      .select(
+        `
+        *,
+        users:user_id (
+          id,
+          first_name,
+          last_name,
+          avatar_url,
+          belt
+        )
+      `,
+      )
+      .eq("id", postId)
+      .eq("is_deleted", false)
+      .single();
 
-    if (!post) {
+    if (postError || !post) {
+      console.error("Post not found:", postError);
       return res.status(404).json({ error: "Post not found" });
     }
 
-    const optimizedPost = optimizePostImages(post);
+    // Get like count and whether current user liked it
+    const { count: likeCount } = await supabase
+      .from("post_likes")
+      .select("*", { count: "exact", head: true })
+      .eq("post_id", postId);
+
+    const { data: userLike } = await supabase
+      .from("post_likes")
+      .select("id")
+      .eq("post_id", postId)
+      .eq("user_id", currentUserId)
+      .single();
+
+    // Shape response to match what frontend expects
+    const shaped = {
+      ...post,
+      user_first_name: post.users?.first_name,
+      user_last_name: post.users?.last_name,
+      user_avatar_url: post.users?.avatar_url,
+      user_belt: post.users?.belt,
+      like_count: likeCount || 0,
+      is_liked_by_current_user: !!userLike,
+    };
+
+    const optimizedPost = optimizePostImages(shaped);
     res.json(optimizedPost);
   } catch (error) {
     console.error("Error in /posts/:postId GET endpoint:", error);
