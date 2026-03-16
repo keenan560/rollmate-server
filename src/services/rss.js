@@ -123,11 +123,39 @@ async function isArticlePosted(articleUrl, articleTitle) {
   return titleMatch && titleMatch.length > 0;
 }
 
+// Validate that an article URL is reachable (no TLS errors, no 4xx/5xx)
+async function isUrlReachable(url, timeoutMs = 5000) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const response = await fetch(url, {
+      method: "HEAD",
+      signal: controller.signal,
+      redirect: "follow",
+    });
+    clearTimeout(timer);
+    return response.ok || response.status === 301 || response.status === 302;
+  } catch (error) {
+    console.log(
+      `URL unreachable (${error.cause?.code || error.message}): ${url}`,
+    );
+    return false;
+  }
+}
+
 // Create post from RSS article
 async function createNewsPost(article, sourceName) {
   try {
     if (await isArticlePosted(article.link, article.title)) {
       console.log(`Article already posted: ${article.title}`);
+      return null;
+    }
+
+    // Skip articles with unreachable URLs (TLS errors, dead links, etc.)
+    if (!(await isUrlReachable(article.link))) {
+      console.log(
+        `Skipping unreachable article: ${article.title} (${article.link})`,
+      );
       return null;
     }
 

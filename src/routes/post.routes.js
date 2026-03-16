@@ -562,6 +562,43 @@ router.post("/posts/youtube", verifyToken, async (req, res) => {
   }
 });
 
+// Search posts (no 72h window)
+router.get("/posts/search", verifyToken, async (req, res) => {
+  try {
+    const currentUserId = req.user.uid;
+    const query = req.query.q;
+
+    if (!query || !query.trim()) {
+      return res.status(400).json({ error: "Search query is required" });
+    }
+
+    const searchTerm = `%${query.trim()}%`;
+
+    const { data, error } = await supabase.rpc("search_posts_with_details", {
+      p_search_term: searchTerm,
+      p_current_user_id: currentUserId,
+      p_limit: 30,
+    });
+
+    if (error) {
+      console.error("Error searching posts:", error);
+      return res.status(500).json({
+        error: "Failed to search posts",
+        message: error.message,
+      });
+    }
+
+    const optimizedPosts = data.map((post) => optimizePostImages(post));
+    res.json(optimizedPosts);
+  } catch (error) {
+    console.error("Error in /posts/search endpoint:", error);
+    res.status(500).json({
+      error: "Failed to search posts",
+      message: error.message,
+    });
+  }
+});
+
 // ============================================
 // GET SINGLE POST BY ID
 // ============================================
