@@ -146,7 +146,18 @@ router.post(
       }
 
       if (status === "cancelled") {
-        if (request.sender_id !== req.user.uid) {
+        if (request.status === "accepted") {
+          // Either party can unfriend an accepted friendship
+          if (
+            request.sender_id !== req.user.uid &&
+            request.receiver_id !== req.user.uid
+          ) {
+            return res.status(403).json({
+              error: "Not authorized to remove this friendship",
+            });
+          }
+        } else if (request.sender_id !== req.user.uid) {
+          // Only the sender can cancel a pending request
           return res.status(403).json({
             error: "Only the sender can cancel a request",
           });
@@ -232,6 +243,41 @@ router.post(
         }
       }
 
+      // ✅ DECREMENT FRIENDS COUNT WHEN ACCEPTED FRIENDSHIP IS CANCELLED
+      if (status === "cancelled" && request.status === "accepted") {
+        try {
+          console.log("Decrementing friends count for both users...");
+
+          const { error: senderError } = await supabase.rpc(
+            "decrement_friends_count",
+            { user_id_param: request.sender_id },
+          );
+
+          if (senderError) {
+            console.warn(
+              "Failed to decrement sender friends count:",
+              senderError,
+            );
+          }
+
+          const { error: receiverError } = await supabase.rpc(
+            "decrement_friends_count",
+            { user_id_param: request.receiver_id },
+          );
+
+          if (receiverError) {
+            console.warn(
+              "Failed to decrement receiver friends count:",
+              receiverError,
+            );
+          }
+
+          console.log("Friends count decremented for both users");
+        } catch (countError) {
+          console.error("Error decrementing friends count:", countError);
+        }
+      }
+
       if (status === "declined") {
         try {
           await sendNotification(
@@ -243,10 +289,26 @@ router.post(
         }
       } else if (status === "cancelled") {
         try {
-          await sendNotification(
-            request.receiver.id,
-            `${request.sender.first_name} has cancelled their roll request`,
-          );
+          if (request.status === "accepted") {
+            // Unfriend notification — notify the other party
+            const otherUserId =
+              req.user.uid === request.sender_id
+                ? request.receiver.id
+                : request.sender.id;
+            const currentUserName =
+              req.user.uid === request.sender_id
+                ? request.sender.first_name
+                : request.receiver.first_name;
+            await sendNotification(
+              otherUserId,
+              `${currentUserName} has removed you as a friend`,
+            );
+          } else {
+            await sendNotification(
+              request.receiver.id,
+              `${request.sender.first_name} has cancelled their roll request`,
+            );
+          }
         } catch (notificationError) {
           console.warn("Notification error:", notificationError);
         }
