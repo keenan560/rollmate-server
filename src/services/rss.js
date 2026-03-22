@@ -3,6 +3,39 @@ const supabase = require("../../config");
 
 const parser = new Parser();
 
+// YouTube channel RSS feed helper
+const ytFeed = (channelId) =>
+  `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`;
+
+// YouTube Video Feeds (matches, highlights, techniques)
+const YOUTUBE_FEEDS = [
+  {
+    name: "Bernardo Faria BJJ",
+    url: ytFeed("UCtXtqlLdZYZm3060qVExXkA"),
+    avatar: "https://www.youtube.com/favicon.ico",
+  },
+  {
+    name: "FloGrappling",
+    url: ytFeed("UCfjGrUg4Y7T3Zf6fy38mAuw"),
+    avatar: "https://www.youtube.com/favicon.ico",
+  },
+  {
+    name: "BJJ Fanatics Videos",
+    url: ytFeed("UCAqme-CE-yLm01BV5nUjPPA"),
+    avatar: "https://www.youtube.com/favicon.ico",
+  },
+  {
+    name: "Chewjitsu Videos",
+    url: ytFeed("UCuauqeukQLtUrucpitF4OGQ"),
+    avatar: "https://www.youtube.com/favicon.ico",
+  },
+  {
+    name: "FEU BJJ",
+    url: ytFeed("UCTsfXMEEfP3i4NvkRUxXpTQ"),
+    avatar: "https://www.youtube.com/favicon.ico",
+  },
+];
+
 // BJJ News Sources
 const RSS_FEEDS = [
   {
@@ -31,11 +64,6 @@ const RSS_FEEDS = [
     avatar: "https://bjjee.com/favicon.ico",
   },
   {
-    name: "Jits Magazine",
-    url: "https://jitsmagazine.com/feed",
-    avatar: "https://jitsmagazine.com/favicon.ico",
-  },
-  {
     name: "BJJ Fanatics",
     url: "https://bjjfanatics.com/blogs/news.atom",
     avatar: "https://bjjfanatics.com/favicon.ico",
@@ -54,6 +82,21 @@ const RSS_FEEDS = [
     name: "BJJ Globetrotters",
     url: "https://bjjglobetrotters.com/feed",
     avatar: "https://bjjglobetrotters.com/favicon.ico",
+  },
+  {
+    name: "UFC News",
+    url: "https://www.ufc.com/rss/news",
+    avatar: "https://www.ufc.com/favicon.ico",
+  },
+  {
+    name: "Rolljunkie",
+    url: "https://rolljunkie.com/blogs/bjj.atom",
+    avatar: "https://rolljunkie.com/favicon.ico",
+  },
+  {
+    name: "Grapplezilla",
+    url: "https://grapplezilla.com/feed",
+    avatar: "https://grapplezilla.com/favicon.ico",
   },
 ];
 
@@ -143,6 +186,17 @@ async function isUrlReachable(url, timeoutMs = 5000) {
   }
 }
 
+// Check if a feed item is a YouTube video
+function isYouTubeItem(article) {
+  return article.link && article.link.includes("youtube.com/watch");
+}
+
+// Extract YouTube video ID from URL
+function getYouTubeVideoId(url) {
+  const match = url.match(/[?&]v=([^&]+)/);
+  return match ? match[1] : null;
+}
+
 // Create post from RSS article
 async function createNewsPost(article, sourceName) {
   try {
@@ -160,16 +214,30 @@ async function createNewsPost(article, sourceName) {
     }
 
     let imageUrl = null;
-    if (article.enclosure?.url) {
+    let mediaType = "none";
+
+    if (isYouTubeItem(article)) {
+      // YouTube video — use thumbnail and set media_type to video
+      const videoId = getYouTubeVideoId(article.link);
+      if (videoId) {
+        imageUrl = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+        mediaType = "video";
+      }
+    } else if (article.enclosure?.url) {
       imageUrl = article.enclosure.url;
+      mediaType = "image";
     } else if (article.content) {
       const imgMatch = article.content.match(/<img[^>]+src="([^">]+)"/);
-      if (imgMatch) imageUrl = imgMatch[1];
+      if (imgMatch) {
+        imageUrl = imgMatch[1];
+        mediaType = "image";
+      }
     }
 
+    const newsTag = sourceName === "UFC News" ? "#UFCNews" : "#BJJNews";
     const content = `${article.title}\n\n${
       article.contentSnippet || ""
-    }\n\nRead more: ${article.link}\n\n#BJJNews #${sourceName.replace(
+    }\n\nRead more: ${article.link}\n\n${newsTag} #${sourceName.replace(
       /\s/g,
       "",
     )}`;
@@ -179,7 +247,7 @@ async function createNewsPost(article, sourceName) {
       .insert({
         user_id: "bjj-news-bot",
         content: content.substring(0, 1000),
-        media_type: imageUrl ? "image" : "none",
+        media_type: mediaType,
         media_url: imageUrl,
       })
       .select()
@@ -214,7 +282,18 @@ async function fetchAndPostBJJNews() {
     }
   }
 
-  console.log(`Posted ${totalPosts} new BJJ news articles`);
+  for (const feed of YOUTUBE_FEEDS) {
+    console.log(`Fetching videos from ${feed.name}...`);
+    const videos = await fetchRSSFeed(feed.url);
+    const recentVideos = videos.slice(0, 3);
+
+    for (const video of recentVideos) {
+      const post = await createNewsPost(video, feed.name);
+      if (post) totalPosts++;
+    }
+  }
+
+  console.log(`Posted ${totalPosts} new BJJ news articles/videos`);
   return totalPosts;
 }
 
@@ -280,4 +359,34 @@ async function cleanupDuplicatePosts() {
   }
 }
 
-module.exports = { fetchAndPostBJJNews, cleanupDuplicatePosts };
+// Delete news posts older than 30 days
+async function purgeOldNewsPosts(retentionDays = 30) {
+  console.log(`Purging news posts older than ${retentionDays} days...`);
+
+  try {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - retentionDays);
+
+    const { data, error, count } = await supabase
+      .from("posts")
+      .delete()
+      .eq("user_id", "bjj-news-bot")
+      .lt("created_at", cutoffDate.toISOString())
+      .select("id");
+
+    if (error) throw error;
+
+    const deleted = data ? data.length : 0;
+    console.log(`Purged ${deleted} old news posts`);
+    return deleted;
+  } catch (error) {
+    console.error("Error purging old news posts:", error);
+    return 0;
+  }
+}
+
+module.exports = {
+  fetchAndPostBJJNews,
+  cleanupDuplicatePosts,
+  purgeOldNewsPosts,
+};

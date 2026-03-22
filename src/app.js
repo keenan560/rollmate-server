@@ -5,7 +5,7 @@ const cron = require("node-cron");
 
 const routes = require("./routes");
 const errorHandler = require("./middleware/errorHandler");
-const { fetchAndPostBJJNews } = require("./services/rss");
+const { fetchAndPostBJJNews, purgeOldNewsPosts } = require("./services/rss");
 
 const app = express();
 
@@ -29,5 +29,11 @@ cron.schedule("0 */6 * * *", async () => {
 setTimeout(() => {
   fetchAndPostBJJNews();
 }, 5000);
+
+// Purge old news posts daily at midnight
+cron.schedule("0 0 * * *", async () => {
+  console.log("Running daily news post cleanup...");
+  await purgeOldNewsPosts(30);
+});
 
 module.exports = app;
