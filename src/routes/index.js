@@ -14,6 +14,7 @@ const trainingPartnersRoutes = require("./trainingPartners.routes");
 const rollRequestsRoutes = require("./rollRequests.routes");
 const placesRoutes = require("./places.routes");
 const supportRoutes = require("./support.routes");
+const trainingLogRoutes = require("./trainingLog.routes");
 
 // Mount routes
 router.use("/", authRoutes);
@@ -29,5 +30,6 @@ router.use("/", trainingPartnersRoutes);
 router.use("/", rollRequestsRoutes);
 router.use("/", placesRoutes);
 router.use("/", supportRoutes);
+router.use("/", trainingLogRoutes);
 
 module.exports = router;
