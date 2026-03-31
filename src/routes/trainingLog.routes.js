@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
+const { sendNotification } = require("../services/notification");
 
 // POST /training-logs — Create a training log entry
 router.post("/training-logs", verifyToken, async (req, res) => {
@@ -15,6 +16,7 @@ router.post("/training-logs", verifyToken, async (req, res) => {
       sparring_rounds,
       notes,
       gym_name,
+      partner_id,
     } = req.body;
 
     if (!date || !duration_minutes || !training_type || !intensity) {
@@ -36,18 +38,149 @@ router.post("/training-logs", verifyToken, async (req, res) => {
         sparring_rounds: sparring_rounds || 0,
         notes: notes || "",
         gym_name: gym_name || null,
+        partner_id: partner_id || null,
       })
       .select()
       .single();
 
     if (error) throw error;
 
-    res.status(201).json({ message: "Training log created", data });
+    // Resolve partner name if partner was tagged
+    if (data.partner_id) {
+      const { data: partner } = await supabase
+        .from("users")
+        .select("first_name, last_name")
+        .eq("id", data.partner_id)
+        .single();
+      if (partner) {
+        data.partner_name = `${partner.first_name} ${partner.last_name}`;
+      }
+    }
+
+    // Fire-and-forget: notify friends about the new session
+    (async () => {
+      try {
+        const { data: user } = await supabase
+          .from("users")
+          .select("first_name, last_name")
+          .eq("id", req.user.uid)
+          .single();
+
+        if (!user) return;
+
+        const { data: friends } = await supabase
+          .from("roll_requests")
+          .select("sender_id, receiver_id")
+          .eq("status", "accepted")
+          .or(`sender_id.eq.${req.user.uid},receiver_id.eq.${req.user.uid}`);
+
+        if (!friends || friends.length === 0) return;
+
+        const friendIds = friends.map((f) =>
+          f.sender_id === req.user.uid ? f.receiver_id : f.sender_id,
+        );
+
+        const body = partner_id
+          ? `Logged a ${training_type} session with a training partner`
+          : `Logged a ${duration_minutes}min ${training_type} session`;
+
+        for (const friendId of friendIds) {
+          sendNotification(
+            friendId,
+            `${user.first_name} just trained 🥋 — ${body}`,
+          ).catch(() => {});
+        }
+      } catch (err) {
+        console.error("Error sending training log notifications:", err);
+      }
+    })();
+
+    res.status(201).json(data);
   } catch (error) {
     console.error("Error creating training log:", error);
     res
       .status(500)
       .json({ error: "Failed to create training log", details: error });
+  }
+});
+
+// GET /training-logs/recent — Sessions from last 24h for user + friends (stories bar)
+router.get("/training-logs/recent", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+
+    // Get friend IDs
+    const { data: friends } = await supabase
+      .from("roll_requests")
+      .select("sender_id, receiver_id")
+      .eq("status", "accepted")
+      .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`);
+
+    const friendIds = (friends || []).map((f) =>
+      f.sender_id === userId ? f.receiver_id : f.sender_id,
+    );
+
+    const allUserIds = [userId, ...friendIds];
+
+    // Get training logs from last 24 hours
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    const { data: logs, error } = await supabase
+      .from("training_logs")
+      .select("*")
+      .in("user_id", allUserIds)
+      .gte("date", since)
+      .order("date", { ascending: false });
+
+    if (error) throw error;
+
+    // Enrich with user info
+    const userIds = [...new Set((logs || []).map((l) => l.user_id))];
+    const { data: users } = await supabase
+      .from("users")
+      .select("id, first_name, last_name, avatar_url, belt")
+      .in("id", userIds);
+
+    const userMap = {};
+    (users || []).forEach((u) => {
+      userMap[u.id] = u;
+    });
+
+    // Resolve partner names
+    const partnerIds = [
+      ...new Set(
+        (logs || []).filter((l) => l.partner_id).map((l) => l.partner_id),
+      ),
+    ];
+    const partnerMap = {};
+    if (partnerIds.length > 0) {
+      const { data: partners } = await supabase
+        .from("users")
+        .select("id, first_name, last_name")
+        .in("id", partnerIds);
+      (partners || []).forEach((p) => {
+        partnerMap[p.id] = `${p.first_name} ${p.last_name}`;
+      });
+    }
+
+    const enriched = (logs || []).map((log) => {
+      const user = userMap[log.user_id] || {};
+      return {
+        ...log,
+        user_first_name: user.first_name || "",
+        user_last_name: user.last_name || "",
+        user_avatar_url: user.avatar_url || null,
+        user_belt: user.belt || null,
+        partner_name: log.partner_id
+          ? partnerMap[log.partner_id] || null
+          : null,
+      };
+    });
+
+    res.status(200).json(enriched);
+  } catch (error) {
+    console.error("Error fetching recent training logs:", error);
+    res.status(500).json({ error: "Failed to fetch recent sessions" });
   }
 });
 
@@ -74,12 +207,79 @@ router.get("/training-logs", verifyToken, async (req, res) => {
 
     if (error) throw error;
 
+    // Resolve partner names for logs that have a partner_id
+    const partnerIds = [
+      ...new Set(logs.filter((l) => l.partner_id).map((l) => l.partner_id)),
+    ];
+    if (partnerIds.length > 0) {
+      const { data: partners } = await supabase
+        .from("users")
+        .select("id, first_name, last_name")
+        .in("id", partnerIds);
+
+      if (partners) {
+        const partnerMap = {};
+        partners.forEach((p) => {
+          partnerMap[p.id] = `${p.first_name} ${p.last_name}`;
+        });
+        logs.forEach((l) => {
+          if (l.partner_id && partnerMap[l.partner_id]) {
+            l.partner_name = partnerMap[l.partner_id];
+          }
+        });
+      }
+    }
+
     res.status(200).json({ logs, total: count, page, limit });
   } catch (error) {
     console.error("Error fetching training logs:", error);
     res
       .status(500)
       .json({ error: "Failed to fetch training logs", details: error });
+  }
+});
+
+// GET /training-logs/user/:userId — Fetch recent logs for a specific user (MateOverview)
+router.get("/training-logs/user/:userId", verifyToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const limit = parseInt(req.query.limit) || 5;
+
+    const { data: logs, error } = await supabase
+      .from("training_logs")
+      .select("*")
+      .eq("user_id", userId)
+      .order("date", { ascending: false })
+      .limit(limit);
+
+    if (error) throw error;
+
+    // Resolve partner names
+    const partnerIds = [
+      ...new Set(
+        (logs || []).filter((l) => l.partner_id).map((l) => l.partner_id),
+      ),
+    ];
+    const partnerMap = {};
+    if (partnerIds.length > 0) {
+      const { data: partners } = await supabase
+        .from("users")
+        .select("id, first_name, last_name")
+        .in("id", partnerIds);
+      (partners || []).forEach((p) => {
+        partnerMap[p.id] = `${p.first_name} ${p.last_name}`;
+      });
+    }
+
+    const enriched = (logs || []).map((l) => ({
+      ...l,
+      partner_name: l.partner_id ? partnerMap[l.partner_id] || null : null,
+    }));
+
+    res.status(200).json({ logs: enriched });
+  } catch (error) {
+    console.error("Error fetching user training logs:", error);
+    res.status(500).json({ error: "Failed to fetch user training logs" });
   }
 });
 

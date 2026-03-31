@@ -15,6 +15,8 @@ const rollRequestsRoutes = require("./rollRequests.routes");
 const placesRoutes = require("./places.routes");
 const supportRoutes = require("./support.routes");
 const trainingLogRoutes = require("./trainingLog.routes");
+const beltProgressRoutes = require("./beltProgress.routes");
+const customTechniquesRoutes = require("./customTechniques.routes");
 
 // Mount routes
 router.use("/", authRoutes);
@@ -31,5 +33,7 @@ router.use("/", rollRequestsRoutes);
 router.use("/", placesRoutes);
 router.use("/", supportRoutes);
 router.use("/", trainingLogRoutes);
+router.use("/", beltProgressRoutes);
+router.use("/", customTechniquesRoutes);
 
 module.exports = router;
