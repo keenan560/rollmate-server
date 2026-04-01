@@ -256,7 +256,25 @@ router.get("/users", verifyToken, async (req, res) => {
     }
 
     // Filter out blocked users
-    const filteredData = data.filter((user) => !blockedIds.includes(user.id));
+    let filteredData = data.filter((user) => !blockedIds.includes(user.id));
+
+    // Filter out private users who aren't friends
+    const { data: friendships } = await supabase
+      .from("roll_requests")
+      .select("sender_id, receiver_id")
+      .eq("status", "accepted")
+      .or(`sender_id.eq.${currentUserId},receiver_id.eq.${currentUserId}`);
+
+    const friendSet = new Set(
+      (friendships || []).map((f) =>
+        f.sender_id === currentUserId ? f.receiver_id : f.sender_id,
+      ),
+    );
+
+    filteredData = filteredData.filter(
+      (user) =>
+        user.id === currentUserId || friendSet.has(user.id) || !user.is_private,
+    );
 
     // Optimize images in all users
     const optimizedUsers = filteredData.map((user) => optimizeUserImages(user));
@@ -298,7 +316,7 @@ router.get("/users/:userId", verifyToken, async (req, res) => {
     const { data, error } = await supabase
       .from("users")
       .select(
-        "id, first_name, last_name, email, avatar_url, primary_gym, gender, age, weight, belt, stripes, height, style_preference, competition_experience, bjj_start_year, city, location, dob, is_instructor, belt_verified, friends_count",
+        "id, first_name, last_name, email, avatar_url, primary_gym, gender, age, weight, belt, stripes, height, style_preference, competition_experience, bjj_start_year, city, location, dob, is_instructor, belt_verified, friends_count, is_private",
       )
       .eq("id", userId)
       .single();
@@ -451,6 +469,25 @@ router.put("/profile/playing-style", verifyToken, async (req, res) => {
   } catch (error) {
     console.error("Error updating playing style:", error);
     res.status(500).json({ error: "Failed to update playing style" });
+  }
+});
+
+// Toggle privacy setting
+router.post("/users/privacy", verifyToken, async (req, res) => {
+  try {
+    const { is_private } = req.body;
+
+    const { error } = await supabase
+      .from("users")
+      .update({ is_private: !!is_private })
+      .eq("id", req.user.uid);
+
+    if (error) throw error;
+
+    res.json({ is_private: !!is_private });
+  } catch (error) {
+    console.error("Error updating privacy setting:", error);
+    res.status(500).json({ error: "Failed to update privacy setting" });
   }
 });
 

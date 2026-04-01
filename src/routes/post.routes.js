@@ -47,7 +47,7 @@ router.get("/posts", verifyToken, async (req, res) => {
       Date.now() - 72 * 60 * 60 * 1000,
     ).toISOString();
 
-    const { data, error } = await supabase.rpc("get_posts_with_details", {
+    let { data, error } = await supabase.rpc("get_posts_with_details", {
       p_limit: limit,
       p_offset: offset,
       p_current_user_id: currentUserId,
@@ -60,6 +60,37 @@ router.get("/posts", verifyToken, async (req, res) => {
         error: "Failed to fetch posts",
         message: error.message,
       });
+    }
+
+    // Filter out posts from private users who aren't friends
+    const postUserIds = [...new Set(data.map((p) => p.user_id))];
+    const { data: privateUsers } = await supabase
+      .from("users")
+      .select("id")
+      .in("id", postUserIds)
+      .eq("is_private", true);
+
+    if (privateUsers && privateUsers.length > 0) {
+      const privateIds = new Set(privateUsers.map((u) => u.id));
+
+      const { data: friendships } = await supabase
+        .from("roll_requests")
+        .select("sender_id, receiver_id")
+        .eq("status", "accepted")
+        .or(`sender_id.eq.${currentUserId},receiver_id.eq.${currentUserId}`);
+
+      const friendSet = new Set(
+        (friendships || []).map((f) =>
+          f.sender_id === currentUserId ? f.receiver_id : f.sender_id,
+        ),
+      );
+
+      data = data.filter(
+        (post) =>
+          post.user_id === currentUserId ||
+          friendSet.has(post.user_id) ||
+          !privateIds.has(post.user_id),
+      );
     }
 
     // Optimize images in all posts

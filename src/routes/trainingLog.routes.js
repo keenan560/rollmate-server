@@ -104,7 +104,7 @@ router.post("/training-logs", verifyToken, async (req, res) => {
   }
 });
 
-// GET /training-logs/recent — Sessions from last 24h for user + friends (stories bar)
+// GET /training-logs/recent — Sessions from last 24h, all users (privacy-filtered)
 router.get("/training-logs/recent", verifyToken, async (req, res) => {
   try {
     const userId = req.user.uid;
@@ -116,29 +116,28 @@ router.get("/training-logs/recent", verifyToken, async (req, res) => {
       .eq("status", "accepted")
       .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`);
 
-    const friendIds = (friends || []).map((f) =>
-      f.sender_id === userId ? f.receiver_id : f.sender_id,
+    const friendIds = new Set(
+      (friends || []).map((f) =>
+        f.sender_id === userId ? f.receiver_id : f.sender_id,
+      ),
     );
 
-    const allUserIds = [userId, ...friendIds];
-
-    // Get training logs from last 24 hours
+    // Get ALL training logs from last 24 hours
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
     const { data: logs, error } = await supabase
       .from("training_logs")
       .select("*")
-      .in("user_id", allUserIds)
       .gte("date", since)
       .order("date", { ascending: false });
 
     if (error) throw error;
 
-    // Enrich with user info
+    // Get user info + privacy status for all log authors
     const userIds = [...new Set((logs || []).map((l) => l.user_id))];
     const { data: users } = await supabase
       .from("users")
-      .select("id, first_name, last_name, avatar_url, belt")
+      .select("id, first_name, last_name, avatar_url, belt, is_private")
       .in("id", userIds);
 
     const userMap = {};
@@ -163,19 +162,29 @@ router.get("/training-logs/recent", verifyToken, async (req, res) => {
       });
     }
 
-    const enriched = (logs || []).map((log) => {
-      const user = userMap[log.user_id] || {};
-      return {
-        ...log,
-        user_first_name: user.first_name || "",
-        user_last_name: user.last_name || "",
-        user_avatar_url: user.avatar_url || null,
-        user_belt: user.belt || null,
-        partner_name: log.partner_id
-          ? partnerMap[log.partner_id] || null
-          : null,
-      };
-    });
+    // Filter: show all public users + friends + self. Hide private non-friends.
+    const enriched = (logs || [])
+      .filter((log) => {
+        const author = userMap[log.user_id];
+        if (!author) return false;
+        if (log.user_id === userId) return true;
+        if (friendIds.has(log.user_id)) return true;
+        if (author.is_private) return false;
+        return true;
+      })
+      .map((log) => {
+        const user = userMap[log.user_id] || {};
+        return {
+          ...log,
+          user_first_name: user.first_name || "",
+          user_last_name: user.last_name || "",
+          user_avatar_url: user.avatar_url || null,
+          user_belt: user.belt || null,
+          partner_name: log.partner_id
+            ? partnerMap[log.partner_id] || null
+            : null,
+        };
+      });
 
     res.status(200).json(enriched);
   } catch (error) {
