@@ -61,7 +61,7 @@ router.post("/roll-request", verifyToken, async (req, res) => {
 
     const { data: senderData } = await supabase
       .from("users")
-      .select("first_name, last_name")
+      .select("first_name, last_name, avatar_url")
       .eq("id", req.user.uid)
       .single();
 
@@ -69,6 +69,19 @@ router.post("/roll-request", verifyToken, async (req, res) => {
       req.body.receiver_id,
       `${senderData.first_name} ${senderData.last_name} wants to be friends!`,
     );
+
+    // Create in-app notification (fire and forget)
+    try {
+      await supabase.from("notifications").insert({
+        user_id: req.body.receiver_id,
+        type: "friend_request",
+        title: `${senderData.first_name} ${senderData.last_name} wants to be friends!`,
+        actor_id: req.user.uid,
+        actor_name: `${senderData.first_name} ${senderData.last_name}`,
+        actor_avatar: senderData.avatar_url || null,
+        reference_id: data.id,
+      });
+    } catch (_) {}
 
     res.status(200).json({
       message: "Friend request sent successfully",

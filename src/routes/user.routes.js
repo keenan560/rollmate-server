@@ -316,7 +316,7 @@ router.get("/users/:userId", verifyToken, async (req, res) => {
     const { data, error } = await supabase
       .from("users")
       .select(
-        "id, first_name, last_name, email, avatar_url, primary_gym, gender, age, weight, belt, stripes, height, style_preference, competition_experience, bjj_start_year, city, location, dob, is_instructor, belt_verified, friends_count, is_private",
+        "id, first_name, last_name, email, avatar_url, primary_gym, gender, age, weight, belt, stripes, height, style_preference, competition_experience, bjj_start_year, city, location, dob, is_instructor, belt_verified, friends_count, is_private, current_streak",
       )
       .eq("id", userId)
       .single();

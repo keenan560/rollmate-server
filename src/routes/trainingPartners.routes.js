@@ -67,10 +67,18 @@ router.get("/training-partners", verifyToken, async (req, res) => {
 
     const userData = currentUser[0];
     const {
-      latitude: userLat,
-      longitude: userLng,
+      latitude: storedLat,
+      longitude: storedLng,
       primary_gym: userGym,
     } = userData;
+
+    // Allow location override from query params (when user searches a different area)
+    const userLat = req.query.latitude
+      ? parseFloat(req.query.latitude)
+      : storedLat;
+    const userLng = req.query.longitude
+      ? parseFloat(req.query.longitude)
+      : storedLng;
 
     console.log("Current user location:", { userLat, userLng, userGym });
 

@@ -45,6 +45,55 @@ router.post("/training-logs", verifyToken, async (req, res) => {
 
     if (error) throw error;
 
+    // Recalculate and persist user's current streak
+    try {
+      const { data: userLogs } = await supabase
+        .from("training_logs")
+        .select("date")
+        .eq("user_id", req.user.uid)
+        .order("date", { ascending: false });
+
+      const uniqueDays = [
+        ...new Set(
+          (userLogs || []).map(
+            (l) => new Date(l.date).toISOString().split("T")[0],
+          ),
+        ),
+      ].sort((a, b) => b.localeCompare(a));
+
+      let streak = 0;
+      if (uniqueDays.length > 0) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const mostRecent = new Date(uniqueDays[0] + "T00:00:00Z");
+        const diffFromToday = Math.floor(
+          (today.getTime() - mostRecent.getTime()) / 86400000,
+        );
+
+        if (diffFromToday <= 1) {
+          streak = 1;
+          for (let i = 1; i < uniqueDays.length; i++) {
+            const curr = new Date(uniqueDays[i] + "T00:00:00Z");
+            const prev = new Date(uniqueDays[i - 1] + "T00:00:00Z");
+            const d = Math.floor((prev.getTime() - curr.getTime()) / 86400000);
+            if (d === 1) {
+              streak++;
+            } else {
+              break;
+            }
+          }
+        }
+      }
+
+      await supabase
+        .from("users")
+        .update({ current_streak: streak })
+        .eq("id", req.user.uid);
+    } catch (streakErr) {
+      console.error("Error updating streak:", streakErr);
+      // Non-blocking — don't fail the response
+    }
+
     // Resolve partner name if partner was tagged
     if (data.partner_id) {
       const { data: partner } = await supabase
@@ -62,7 +111,7 @@ router.post("/training-logs", verifyToken, async (req, res) => {
       try {
         const { data: user } = await supabase
           .from("users")
-          .select("first_name, last_name")
+          .select("first_name, last_name, avatar_url")
           .eq("id", req.user.uid)
           .single();
 
@@ -84,11 +133,55 @@ router.post("/training-logs", verifyToken, async (req, res) => {
           ? `Logged a ${training_type} session with a training partner`
           : `Logged a ${duration_minutes}min ${training_type} session`;
 
+        // Send push notifications
         for (const friendId of friendIds) {
           sendNotification(
             friendId,
             `${user.first_name} just trained 🥋 — ${body}`,
           ).catch(() => {});
+        }
+
+        // Batch insert in-app notifications for all friends
+        const notifications = friendIds.map((friendId) => ({
+          user_id: friendId,
+          type: "training_session",
+          title: `${user.first_name} just trained 🥋`,
+          body,
+          actor_id: req.user.uid,
+          actor_name: `${user.first_name} ${user.last_name}`,
+          actor_avatar: user.avatar_url || null,
+          reference_id: data.id,
+        }));
+
+        const { error: notifError } = await supabase
+          .from("notifications")
+          .insert(notifications);
+
+        if (notifError) {
+          console.error("Error inserting friend notifications:", notifError);
+        }
+
+        // Notify tagged partner specifically (if not already a friend)
+        if (partner_id && !friendIds.includes(partner_id)) {
+          const { error: partnerNotifError } = await supabase
+            .from("notifications")
+            .insert({
+              user_id: partner_id,
+              type: "tagged_session",
+              title: `${user.first_name} tagged you in a session 🏷️`,
+              body,
+              actor_id: req.user.uid,
+              actor_name: `${user.first_name} ${user.last_name}`,
+              actor_avatar: user.avatar_url || null,
+              reference_id: data.id,
+            });
+
+          if (partnerNotifError) {
+            console.error(
+              "Error inserting partner notification:",
+              partnerNotifError,
+            );
+          }
         }
       } catch (err) {
         console.error("Error sending training log notifications:", err);
@@ -122,8 +215,8 @@ router.get("/training-logs/recent", verifyToken, async (req, res) => {
       ),
     );
 
-    // Get ALL training logs from last 24 hours
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    // Get ALL training logs from last 7 days
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
     const { data: logs, error } = await supabase
       .from("training_logs")

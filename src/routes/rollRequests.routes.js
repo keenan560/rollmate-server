@@ -46,44 +46,7 @@ router.post("/roll-requests", verifyToken, async (req, res) => {
   }
 });
 
-// GET /roll-requests - Get user's roll requests (received)
-router.get("/roll-requests", verifyToken, async (req, res) => {
-  try {
-    const userId = req.user.uid;
-
-    const { data: requests, error } = await supabase
-      .from("roll_requests")
-      .select(
-        `*,
-        sender:sender_id (
-          id,
-          first_name,
-          last_name,
-          avatar_url,
-          belt,
-          primary_gym
-        )`,
-      )
-      .eq("receiver_id", userId) // Note: using receiver_id to match existing schema
-      .order("created_at", { ascending: false });
-
-    if (error) {
-      console.error("Error fetching roll requests:", error);
-      return res.status(500).json({ error: "Failed to fetch roll requests" });
-    }
-
-    // Optimize user avatars in requests
-    const optimizedRequests = (requests || []).map((request) => ({
-      ...request,
-      sender: request.sender ? optimizeUserImages(request.sender) : null,
-    }));
-
-    res.json({ requests: optimizedRequests });
-  } catch (error) {
-    console.error("Error fetching roll requests:", error);
-    res.status(500).json({ error: "Failed to fetch roll requests" });
-  }
-});
+// NOTE: GET /roll-requests is handled in roll.routes.js (returns both received + sent with user joins)
 
 // PUT /roll-requests/:id/accept - Accept a roll request
 router.put("/roll-requests/:id/accept", verifyToken, async (req, res) => {

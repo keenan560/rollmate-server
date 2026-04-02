@@ -29,6 +29,34 @@ router.get("/belt-progress", verifyToken, async (req, res) => {
   }
 });
 
+// GET /belt-progress/:userId — Returns checked technique IDs for a specific user's current belt
+router.get("/belt-progress/:userId", verifyToken, async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const { data: user } = await supabase
+      .from("users")
+      .select("belt")
+      .eq("id", userId)
+      .single();
+
+    const belt = user?.belt || "white";
+
+    const { data, error } = await supabase
+      .from("belt_progress")
+      .select("technique_id")
+      .eq("user_id", userId)
+      .eq("belt", belt);
+
+    if (error) throw error;
+
+    res.json({ checked: (data || []).map((d) => d.technique_id) });
+  } catch (error) {
+    console.error("Error fetching user belt progress:", error);
+    res.status(500).json({ error: "Failed to fetch belt progress" });
+  }
+});
+
 // POST /belt-progress — Toggle a technique (add or remove)
 router.post("/belt-progress", verifyToken, async (req, res) => {
   try {
