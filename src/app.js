@@ -55,4 +55,21 @@ cron.schedule("0 3 * * *", async () => {
   }
 });
 
+// Cleanup old events daily at 2am (7 days past event_date)
+cron.schedule("0 2 * * *", async () => {
+  console.log("Running daily events cleanup...");
+  const sevenDaysAgo = new Date(
+    Date.now() - 7 * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const { error } = await supabase
+    .from("events")
+    .delete()
+    .lt("event_date", sevenDaysAgo);
+  if (error) {
+    console.error("Error cleaning up old events:", error);
+  } else {
+    console.log("Old events cleaned up");
+  }
+});
+
 module.exports = app;

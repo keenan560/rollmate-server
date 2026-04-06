@@ -43,6 +43,10 @@ function optimizePostImages(post) {
 
   return {
     ...post,
+    // Keep original URLs for full-screen viewing
+    original_media_url: post.media_url || null,
+    original_media_urls: post.media_urls || null,
+
     // Optimize main media
     media_url: post.media_url
       ? optimizeImageUrl(post.media_url, "medium")

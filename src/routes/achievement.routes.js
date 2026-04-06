@@ -87,6 +87,41 @@ router.post("/achievements", verifyToken, async (req, res) => {
 
     if (error) throw error;
 
+    // Notify friends (fire and forget)
+    supabase
+      .from("users")
+      .select("first_name, last_name, avatar_url")
+      .eq("id", currentUserId)
+      .single()
+      .then(({ data: user }) => {
+        if (!user) return;
+        return supabase
+          .from("roll_requests")
+          .select("sender_id, receiver_id")
+          .eq("status", "accepted")
+          .or(`sender_id.eq.${currentUserId},receiver_id.eq.${currentUserId}`)
+          .then(({ data: friends }) => {
+            const friendIds = (friends || []).map((f) =>
+              f.sender_id === currentUserId ? f.receiver_id : f.sender_id,
+            );
+            if (friendIds.length === 0) return;
+            const notifications = friendIds.map((fid) => ({
+              user_id: fid,
+              type: "achievement",
+              title: `${user.first_name} added an achievement 🏆`,
+              body: data.competition_name || "New competition result",
+              actor_id: currentUserId,
+              actor_name: `${user.first_name} ${user.last_name}`,
+              actor_avatar: user.avatar_url,
+              reference_id: data.id,
+            }));
+            return supabase.from("notifications").insert(notifications);
+          });
+      })
+      .catch((err) =>
+        console.error("Error sending achievement notifications:", err),
+      );
+
     res.status(201).json({ achievement: data });
   } catch (error) {
     console.error("Error creating achievement:", error);
