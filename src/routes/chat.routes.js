@@ -152,6 +152,13 @@ router.post(
 
       console.log("Using chat for message:", chatData);
 
+      // Remove deleted_chats record for the sender so the conversation reappears
+      await supabase
+        .from("deleted_chats")
+        .delete()
+        .eq("chat_id", chatData.id)
+        .eq("user_id", req.user.uid);
+
       // Upload all images to storage
       let imageUrls = [];
       if (imageFiles && imageFiles.length > 0) {
@@ -615,6 +622,155 @@ router.delete("/chats/:chatId", verifyToken, async (req, res) => {
   } catch (error) {
     console.error("Error in DELETE /chats/:chatId:", error);
     res.status(500).json({ error: "Failed to delete conversation" });
+  }
+});
+
+// GET /conversations — Optimized conversation list (single endpoint)
+router.get("/conversations", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+
+    // 1. Get all accepted friendships for this user
+    const { data: friendships, error: friendError } = await supabase
+      .from("roll_requests")
+      .select("id, sender_id, receiver_id")
+      .eq("status", "accepted")
+      .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`);
+
+    if (friendError) throw friendError;
+    if (!friendships || friendships.length === 0) return res.json([]);
+
+    // 2. Get deleted chat IDs for this user
+    const { data: deletedChats } = await supabase
+      .from("deleted_chats")
+      .select("chat_id")
+      .eq("user_id", userId);
+
+    const deletedChatIds = new Set((deletedChats || []).map((d) => d.chat_id));
+
+    // 3. Get all chats for these friendships
+    const rollRequestIds = friendships.map((f) => f.id);
+    const { data: chats, error: chatError } = await supabase
+      .from("chats")
+      .select("id, roll_request_id, last_message_at, created_at")
+      .in("roll_request_id", rollRequestIds);
+
+    if (chatError) throw chatError;
+    if (!chats || chats.length === 0) return res.json([]);
+
+    // Filter out deleted chats
+    const activeChats = chats.filter((c) => !deletedChatIds.has(c.id));
+    if (activeChats.length === 0) return res.json([]);
+
+    // 4. Build a map of roll_request_id -> friendship
+    const friendshipMap = {};
+    friendships.forEach((f) => {
+      friendshipMap[f.id] = f;
+    });
+
+    // 5. Get the other user's info for each chat
+    const otherUserIds = [
+      ...new Set(
+        activeChats.map((c) => {
+          const f = friendshipMap[c.roll_request_id];
+          return f.sender_id === userId ? f.receiver_id : f.sender_id;
+        }),
+      ),
+    ];
+
+    const { data: users } = await supabase
+      .from("users")
+      .select("id, first_name, last_name, avatar_url, belt")
+      .in("id", otherUserIds);
+
+    const userMap = {};
+    (users || []).forEach((u) => {
+      userMap[u.id] = u;
+    });
+
+    // 6. Get the last message for each chat (batch query)
+    const chatIds = activeChats.map((c) => c.id);
+    const { data: lastMessages } = await supabase
+      .from("chat_messages")
+      .select(
+        "id, chat_id, sender_id, message, image_url, image_urls, created_at, deleted_for_everyone, deleted_for_sender, deleted_for_receiver",
+      )
+      .in("chat_id", chatIds)
+      .order("created_at", { ascending: false });
+
+    // Group by chat_id and pick the first visible message per chat
+    const lastMessageMap = {};
+    (lastMessages || []).forEach((m) => {
+      if (lastMessageMap[m.chat_id]) return; // already found the latest for this chat
+
+      // Skip messages deleted for this user
+      if (m.deleted_for_everyone) {
+        // Still show "This message was deleted" as last message
+        lastMessageMap[m.chat_id] = {
+          ...m,
+          message: "This message was deleted",
+          image_url: null,
+          image_urls: null,
+        };
+        return;
+      }
+      const isSender = m.sender_id === userId;
+      if (isSender && m.deleted_for_sender) return;
+      if (!isSender && m.deleted_for_receiver) return;
+
+      lastMessageMap[m.chat_id] = m;
+    });
+
+    // 7. Assemble conversations
+    const conversations = activeChats.map((chat) => {
+      const friendship = friendshipMap[chat.roll_request_id];
+      const otherUserId =
+        friendship.sender_id === userId
+          ? friendship.receiver_id
+          : friendship.sender_id;
+      const otherUser = userMap[otherUserId] || {};
+      const lastMessage = lastMessageMap[chat.id] || null;
+
+      return {
+        chat_id: chat.id,
+        roll_request_id: chat.roll_request_id,
+        other_user: {
+          id: otherUserId,
+          first_name: otherUser.first_name || null,
+          last_name: otherUser.last_name || null,
+          avatar_url: otherUser.avatar_url
+            ? optimizeImageUrl(otherUser.avatar_url, "avatar")
+            : null,
+          belt: otherUser.belt || null,
+        },
+        last_message: lastMessage
+          ? {
+              id: lastMessage.id,
+              message: lastMessage.message,
+              sender_id: lastMessage.sender_id,
+              created_at: lastMessage.created_at,
+              has_image: !!(
+                lastMessage.image_url ||
+                (lastMessage.image_urls && lastMessage.image_urls.length > 0)
+              ),
+            }
+          : null,
+        unread_count: 0,
+        last_message_at: chat.last_message_at || chat.created_at,
+      };
+    });
+
+    // Sort by most recent message
+    conversations.sort(
+      (a, b) => new Date(b.last_message_at) - new Date(a.last_message_at),
+    );
+
+    res.json(conversations);
+  } catch (error) {
+    console.error("Error in GET /conversations:", error);
+    res
+      .status(500)
+      .json({ error: "Failed to fetch conversations", message: error.message });
   }
 });
 

@@ -41,48 +41,17 @@ function optimizeImageUrls(urls, size = "medium") {
 function optimizePostImages(post) {
   if (!post) return post;
 
-  return {
-    ...post,
-    // Keep original URLs for full-screen viewing
-    original_media_url: post.media_url || null,
-    original_media_urls: post.media_urls || null,
-
-    // Optimize main media
-    media_url: post.media_url
-      ? optimizeImageUrl(post.media_url, "medium")
-      : null,
-
-    // Optimize multiple images
-    media_urls: post.media_urls
-      ? optimizeImageUrls(post.media_urls, "medium")
-      : null,
-
-    // Optimize user avatar
-    avatar_url: post.avatar_url
-      ? optimizeImageUrl(post.avatar_url, "avatar")
-      : null,
-
-    // Optimize link preview image
-    link_preview:
-      post.link_preview && post.link_preview.image
-        ? {
-            ...post.link_preview,
-            image: optimizeImageUrl(post.link_preview.image, "small"),
-          }
-        : post.link_preview,
-  };
+  // Return post as-is, no image transformation
+  // expo-image handles caching on the client
+  return post;
 }
 
 // Optimize user object
 function optimizeUserImages(user) {
   if (!user) return user;
 
-  return {
-    ...user,
-    avatar_url: user.avatar_url
-      ? optimizeImageUrl(user.avatar_url, "avatar")
-      : null,
-  };
+  // Don't transform avatar_url — keep original quality
+  return user;
 }
 
 module.exports = {

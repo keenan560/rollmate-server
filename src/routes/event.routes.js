@@ -251,6 +251,7 @@ router.get("/events", verifyToken, async (req, res) => {
     const latitude = parseFloat(req.query.latitude);
     const longitude = parseFloat(req.query.longitude);
     const radius = parseFloat(req.query.radius) || 50; // miles
+    const search = req.query.search;
 
     let query = supabase
       .from("events")
@@ -259,6 +260,26 @@ router.get("/events", verifyToken, async (req, res) => {
       .gte("event_date", new Date().toISOString())
       .order("event_date", { ascending: true })
       .range(offset, offset + limit - 1);
+
+    if (search) {
+      // Also match events by creator name
+      const { data: matchingUsers } = await supabase
+        .from("users")
+        .select("id")
+        .or(`first_name.ilike.%${search}%,last_name.ilike.%${search}%`);
+
+      const userIds = (matchingUsers || []).map((u) => u.id);
+
+      if (userIds.length > 0) {
+        query = query.or(
+          `title.ilike.%${search}%,location_name.ilike.%${search}%,description.ilike.%${search}%,creator_id.in.(${userIds.join(",")})`,
+        );
+      } else {
+        query = query.or(
+          `title.ilike.%${search}%,location_name.ilike.%${search}%,description.ilike.%${search}%`,
+        );
+      }
+    }
 
     const { data: events, error } = await query;
 
@@ -366,7 +387,7 @@ router.post("/events/:eventId/rsvp", verifyToken, async (req, res) => {
     // Check event exists
     const { data: event, error: eventError } = await supabase
       .from("events")
-      .select("id")
+      .select("id, creator_id, title")
       .eq("id", eventId)
       .eq("is_deleted", false)
       .single();
@@ -407,6 +428,29 @@ router.post("/events/:eventId/rsvp", verifyToken, async (req, res) => {
       .eq("event_id", eventId);
 
     res.json({ rsvped: !existing, rsvp_count: count || 0 });
+
+    // Notify event creator on RSVP (fire and forget)
+    if (!existing && event.creator_id !== userId) {
+      supabase
+        .from("users")
+        .select("first_name, last_name, avatar_url")
+        .eq("id", userId)
+        .single()
+        .then(({ data: user }) => {
+          if (!user) return;
+          return supabase.from("notifications").insert({
+            user_id: event.creator_id,
+            type: "event_rsvp",
+            title: `${user.first_name} is going to your event 🤙`,
+            body: event.title,
+            actor_id: userId,
+            actor_name: `${user.first_name} ${user.last_name}`,
+            actor_avatar: user.avatar_url,
+            reference_id: eventId,
+          });
+        })
+        .catch((err) => console.error("Error sending RSVP notification:", err));
+    }
   } catch (error) {
     console.error("Error in POST /events/:eventId/rsvp:", error);
     res
