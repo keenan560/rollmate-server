@@ -385,6 +385,40 @@ router.get("/training-logs/user/:userId", verifyToken, async (req, res) => {
   }
 });
 
+// GET /training-logs/:id — Fetch a single training log by ID
+router.get("/training-logs/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: log, error } = await supabase
+      .from("training_logs")
+      .select("*")
+      .eq("id", id)
+      .single();
+
+    if (error || !log) {
+      return res.status(404).json({ error: "Training log not found" });
+    }
+
+    // Resolve partner name if present
+    if (log.partner_id) {
+      const { data: partner } = await supabase
+        .from("users")
+        .select("first_name, last_name")
+        .eq("id", log.partner_id)
+        .single();
+      if (partner) {
+        log.partner_name = `${partner.first_name} ${partner.last_name}`;
+      }
+    }
+
+    res.json(log);
+  } catch (error) {
+    console.error("Error fetching training log:", error);
+    res.status(500).json({ error: "Failed to fetch training log" });
+  }
+});
+
 // DELETE /training-logs/:id — Delete a training log (owner only)
 router.delete("/training-logs/:id", verifyToken, async (req, res) => {
   try {

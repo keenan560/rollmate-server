@@ -241,6 +241,52 @@ router.post("/events", verifyToken, async (req, res) => {
   }
 });
 
+// GET /events/mine — Current user's events (with search and sort)
+router.get("/events/mine", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 50);
+    const offset = (page - 1) * limit;
+    const search = req.query.search;
+    const sort = req.query.sort || "date_desc";
+
+    let query = supabase
+      .from("events")
+      .select("*", { count: "exact" })
+      .eq("creator_id", userId)
+      .eq("is_deleted", false);
+
+    if (search) {
+      query = query.or(
+        `title.ilike.%${search}%,location_name.ilike.%${search}%`,
+      );
+    }
+
+    const ascending = sort === "date_asc";
+    query = query
+      .order("event_date", { ascending })
+      .range(offset, offset + limit - 1);
+
+    const { data: events, error, count } = await query;
+
+    if (error) {
+      console.error("Error fetching user events:", error);
+      return res
+        .status(500)
+        .json({ error: "Failed to fetch events", message: error.message });
+    }
+
+    const enriched = await enrichEvents(events || [], userId);
+    res.json({ events: enriched, total: count, page, limit });
+  } catch (error) {
+    console.error("Error in GET /events/mine:", error);
+    res
+      .status(500)
+      .json({ error: "Failed to fetch events", message: error.message });
+  }
+});
+
 // GET /events — Upcoming events (paginated, optional location filter)
 router.get("/events", verifyToken, async (req, res) => {
   try {
@@ -350,6 +396,31 @@ router.get("/events/feed", verifyToken, async (req, res) => {
     res
       .status(500)
       .json({ error: "Failed to fetch feed events", message: error.message });
+  }
+});
+
+// GET /events/:eventId — Fetch a single event by ID
+router.get("/events/:eventId", verifyToken, async (req, res) => {
+  try {
+    const currentUserId = req.user.uid;
+    const { eventId } = req.params;
+
+    const { data: event, error } = await supabase
+      .from("events")
+      .select("*")
+      .eq("id", eventId)
+      .eq("is_deleted", false)
+      .single();
+
+    if (error || !event) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    const [enriched] = await enrichEvents([event], currentUserId);
+    res.json(enriched);
+  } catch (error) {
+    console.error("Error in GET /events/:eventId:", error);
+    res.status(500).json({ error: "Failed to fetch event" });
   }
 });
 

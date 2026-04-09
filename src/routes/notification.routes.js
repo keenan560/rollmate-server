@@ -89,4 +89,46 @@ router.post("/notifications/read", verifyToken, async (req, res) => {
   }
 });
 
+// DELETE /notifications/:id — Delete a single notification
+router.delete("/notifications/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.uid;
+
+    const { data, error } = await supabase
+      .from("notifications")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", userId)
+      .select()
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ error: "Notification not found" });
+    }
+
+    res.json({ message: "Notification deleted" });
+  } catch (error) {
+    console.error("Error deleting notification:", error);
+    res.status(500).json({ error: "Failed to delete notification" });
+  }
+});
+
+// DELETE /notifications — Clear all notifications for current user
+router.delete("/notifications", verifyToken, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("notifications")
+      .delete()
+      .eq("user_id", req.user.uid);
+
+    if (error) throw error;
+
+    res.json({ message: "All notifications cleared" });
+  } catch (error) {
+    console.error("Error clearing notifications:", error);
+    res.status(500).json({ error: "Failed to clear notifications" });
+  }
+});
+
 module.exports = router;
