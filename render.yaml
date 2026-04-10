@@ -1,9 +1,32 @@
 services:
+  # UAT Environment
   - type: web
-    name: rollmate-server
+    name: rollmate-server-uat
+    env: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: uat
+      - key: SUPABASE_URL
+        sync: false  # set manually in Render dashboard
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
+
+  # Production Environment
+  - type: web
+    name: rollmate-server-prod
     env: node
     buildCommand: npm install
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
+      - key: SUPABASE_URL
+        sync: false  # set manually in Render dashboard
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
