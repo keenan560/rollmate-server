@@ -549,6 +549,104 @@ router.post(
   },
 );
 
+// Generate signed upload URLs for direct-to-Supabase video upload
+router.post("/posts/video/signed-url", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { videoExtension, videoContentType, hasThumbnail } = req.body;
+    const timestamp = Date.now();
+
+    // Generate signed URL for video
+    const videoPath = `video_${userId}_${timestamp}.${videoExtension}`;
+    const { data: videoData, error: videoError } = await supabase.storage
+      .from("post-videos")
+      .createSignedUploadUrl(videoPath);
+
+    if (videoError) throw videoError;
+
+    let thumbnailUploadUrl = null;
+    let thumbnailPath = null;
+
+    // Generate signed URL for thumbnail if needed
+    if (hasThumbnail) {
+      thumbnailPath = `thumb_${userId}_${timestamp}.jpg`;
+      const { data: thumbData, error: thumbError } = await supabase.storage
+        .from("video-thumbnails")
+        .createSignedUploadUrl(thumbnailPath);
+
+      if (!thumbError) {
+        thumbnailUploadUrl = thumbData.signedUrl;
+      }
+    }
+
+    res.json({
+      videoUploadUrl: videoData.signedUrl,
+      videoPath,
+      thumbnailUploadUrl,
+      thumbnailPath,
+    });
+  } catch (error) {
+    console.error("Error generating signed URLs:", error);
+    res.status(500).json({ message: "Failed to generate upload URLs" });
+  }
+});
+
+// Create post record after direct-to-Supabase video upload
+router.post("/posts/video/complete", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { content, videoPath, thumbnailPath } = req.body;
+
+    // Get public URLs
+    const { data: videoUrlData } = supabase.storage
+      .from("post-videos")
+      .getPublicUrl(videoPath);
+
+    let thumbnailUrl = null;
+    if (thumbnailPath) {
+      const { data: thumbUrlData } = supabase.storage
+        .from("video-thumbnails")
+        .getPublicUrl(thumbnailPath);
+      thumbnailUrl = thumbUrlData.publicUrl;
+    }
+
+    // Insert post record
+    const { data: post, error } = await supabase
+      .from("posts")
+      .insert({
+        user_id: userId,
+        content,
+        media_type: "video",
+        media_url: videoUrlData.publicUrl,
+        video_thumbnail_url: thumbnailUrl,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Fetch enriched post data
+    const { data: completePost, error: rpcError } = await supabase.rpc(
+      "get_posts_with_details",
+      {
+        p_limit: 1,
+        p_offset: 0,
+        p_current_user_id: userId,
+        p_since: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
+      },
+    );
+
+    if (rpcError) {
+      console.error("Error fetching complete post:", rpcError);
+    }
+
+    res.status(201).json(completePost?.[0] || post);
+  } catch (error) {
+    console.error("Error creating video post:", error);
+    res.status(500).json({ message: "Failed to create video post" });
+  }
+});
+
 // Create post with YouTube video
 router.post("/posts/youtube", verifyToken, async (req, res) => {
   try {
