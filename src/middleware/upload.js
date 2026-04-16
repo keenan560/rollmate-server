@@ -46,21 +46,7 @@ const postVideoUpload = multer({
     fileSize: 50 * 1024 * 1024, // 50MB limit (Supabase free tier limit)
   },
   fileFilter: (req, file, cb) => {
-    const allowedMimeTypes = [
-      "video/mp4",
-      "video/quicktime", // iOS .mov files
-      "video/x-msvideo", // .avi files
-      "video/webm",
-      "video/mpeg",
-      "video/x-matroska", // .mkv files
-    ];
-
-    const allowedExtensions = /mp4|mov|avi|webm|mpeg|mkv/;
-    const extname = allowedExtensions.test(
-      path.extname(file.originalname).toLowerCase(),
-    );
-
-    if (allowedMimeTypes.includes(file.mimetype) && extname) {
+    if (file.mimetype.startsWith("video/")) {
       return cb(null, true);
     } else {
       cb(new Error("Only video files are allowed!"));
