@@ -200,7 +200,11 @@ router.post("/posts", verifyToken, async (req, res) => {
       return res.json(data);
     }
 
-    res.status(201).json(completePost[0] || data);
+    if (rpcError) {
+      console.error("Error fetching complete post:", rpcError);
+    }
+
+    res.status(201).json(completePost?.[0] || data);
   } catch (error) {
     console.error("Error in /posts POST endpoint:", error);
     res.status(500).json({
@@ -274,7 +278,7 @@ router.post(
         });
       }
 
-      const { data: completePost } = await supabase.rpc(
+      const { data: completePost, error: rpcError } = await supabase.rpc(
         "get_posts_with_details",
         {
           p_limit: 1,
@@ -283,7 +287,11 @@ router.post(
         },
       );
 
-      res.status(201).json(completePost[0] || data);
+      if (rpcError) {
+        console.error("Error fetching complete post:", rpcError);
+      }
+
+      res.status(201).json(completePost?.[0] || data);
     } catch (error) {
       console.error("Error in /posts/image endpoint:", error);
       res.status(500).json({
@@ -391,7 +399,7 @@ router.post(
         });
       }
 
-      const { data: completePost } = await supabase.rpc(
+      const { data: completePost, error: rpcError } = await supabase.rpc(
         "get_posts_with_details",
         {
           p_limit: 1,
@@ -400,7 +408,11 @@ router.post(
         },
       );
 
-      res.status(201).json(completePost[0] || data);
+      if (rpcError) {
+        console.error("Error fetching complete post:", rpcError);
+      }
+
+      res.status(201).json(completePost?.[0] || data);
     } catch (error) {
       console.error("Error in /posts/images endpoint:", error);
       res.status(500).json({
@@ -513,7 +525,7 @@ router.post(
         });
       }
 
-      const { data: completePost } = await supabase.rpc(
+      const { data: completePost, error: rpcError } = await supabase.rpc(
         "get_posts_with_details",
         {
           p_limit: 1,
@@ -522,7 +534,11 @@ router.post(
         },
       );
 
-      res.status(201).json(completePost[0] || data);
+      if (rpcError) {
+        console.error("Error fetching complete post:", rpcError);
+      }
+
+      res.status(201).json(completePost?.[0] || data);
     } catch (error) {
       console.error("Error in /posts/video endpoint:", error);
       res.status(500).json({
@@ -574,7 +590,7 @@ router.post("/posts/youtube", verifyToken, async (req, res) => {
       });
     }
 
-    const { data: completePost } = await supabase.rpc(
+    const { data: completePost, error: rpcError } = await supabase.rpc(
       "get_posts_with_details",
       {
         p_limit: 1,
@@ -583,7 +599,11 @@ router.post("/posts/youtube", verifyToken, async (req, res) => {
       },
     );
 
-    res.status(201).json(completePost[0] || data);
+    if (rpcError) {
+      console.error("Error fetching complete post:", rpcError);
+    }
+
+    res.status(201).json(completePost?.[0] || data);
   } catch (error) {
     console.error("Error in /posts/youtube endpoint:", error);
     res.status(500).json({
