@@ -192,16 +192,13 @@ router.post("/posts", verifyToken, async (req, res) => {
         p_limit: 1,
         p_offset: 0,
         p_current_user_id: currentUserId,
+        p_since: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
       },
     );
 
     if (fetchError) {
       console.error("Error fetching complete post:", fetchError);
       return res.json(data);
-    }
-
-    if (rpcError) {
-      console.error("Error fetching complete post:", rpcError);
     }
 
     res.status(201).json(completePost?.[0] || data);
@@ -284,6 +281,7 @@ router.post(
           p_limit: 1,
           p_offset: 0,
           p_current_user_id: currentUserId,
+          p_since: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
         },
       );
 
@@ -405,6 +403,7 @@ router.post(
           p_limit: 1,
           p_offset: 0,
           p_current_user_id: currentUserId,
+          p_since: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
         },
       );
 
@@ -531,6 +530,7 @@ router.post(
           p_limit: 1,
           p_offset: 0,
           p_current_user_id: currentUserId,
+          p_since: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
         },
       );
 
@@ -596,6 +596,7 @@ router.post("/posts/youtube", verifyToken, async (req, res) => {
         p_limit: 1,
         p_offset: 0,
         p_current_user_id: currentUserId,
+        p_since: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(),
       },
     );
 
