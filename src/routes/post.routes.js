@@ -556,13 +556,27 @@ router.post("/posts/video/signed-url", verifyToken, async (req, res) => {
     const { videoExtension, videoContentType, hasThumbnail } = req.body;
     const timestamp = Date.now();
 
+    console.log(
+      `[Video Signed URL] User: ${userId}, ext: ${videoExtension}, contentType: ${videoContentType}, hasThumbnail: ${hasThumbnail}`,
+    );
+
     // Generate signed URL for video
     const videoPath = `video_${userId}_${timestamp}.${videoExtension}`;
     const { data: videoData, error: videoError } = await supabase.storage
       .from("post-videos")
       .createSignedUploadUrl(videoPath);
 
-    if (videoError) throw videoError;
+    if (videoError) {
+      console.error(
+        `[Video Signed URL] Failed to create video signed URL:`,
+        videoError,
+      );
+      throw videoError;
+    }
+
+    console.log(
+      `[Video Signed URL] Video signed URL created for path: ${videoPath}`,
+    );
 
     let thumbnailUploadUrl = null;
     let thumbnailPath = null;
@@ -574,11 +588,20 @@ router.post("/posts/video/signed-url", verifyToken, async (req, res) => {
         .from("video-thumbnails")
         .createSignedUploadUrl(thumbnailPath);
 
-      if (!thumbError) {
+      if (thumbError) {
+        console.error(
+          `[Video Signed URL] Failed to create thumbnail signed URL:`,
+          thumbError,
+        );
+      } else {
         thumbnailUploadUrl = thumbData.signedUrl;
+        console.log(
+          `[Video Signed URL] Thumbnail signed URL created for path: ${thumbnailPath}`,
+        );
       }
     }
 
+    console.log(`[Video Signed URL] Success - returning signed URLs to client`);
     res.json({
       videoUploadUrl: videoData.signedUrl,
       videoPath,
@@ -586,7 +609,7 @@ router.post("/posts/video/signed-url", verifyToken, async (req, res) => {
       thumbnailPath,
     });
   } catch (error) {
-    console.error("Error generating signed URLs:", error);
+    console.error("[Video Signed URL] Error:", error);
     res.status(500).json({ message: "Failed to generate upload URLs" });
   }
 });
@@ -597,10 +620,19 @@ router.post("/posts/video/complete", verifyToken, async (req, res) => {
     const userId = req.user.uid;
     const { content, videoPath, thumbnailPath } = req.body;
 
+    console.log(
+      `[Video Complete] User: ${userId}, videoPath: ${videoPath}, thumbnailPath: ${thumbnailPath}`,
+    );
+    console.log(
+      `[Video Complete] Content: "${content?.substring(0, 50)}${content?.length > 50 ? "..." : ""}"`,
+    );
+
     // Get public URLs
     const { data: videoUrlData } = supabase.storage
       .from("post-videos")
       .getPublicUrl(videoPath);
+
+    console.log(`[Video Complete] Video public URL: ${videoUrlData.publicUrl}`);
 
     let thumbnailUrl = null;
     if (thumbnailPath) {
@@ -608,6 +640,7 @@ router.post("/posts/video/complete", verifyToken, async (req, res) => {
         .from("video-thumbnails")
         .getPublicUrl(thumbnailPath);
       thumbnailUrl = thumbUrlData.publicUrl;
+      console.log(`[Video Complete] Thumbnail public URL: ${thumbnailUrl}`);
     }
 
     // Insert post record
@@ -623,7 +656,12 @@ router.post("/posts/video/complete", verifyToken, async (req, res) => {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error(`[Video Complete] Failed to insert post:`, error);
+      throw error;
+    }
+
+    console.log(`[Video Complete] Post created with id: ${post.id}`);
 
     // Fetch enriched post data
     const { data: completePost, error: rpcError } = await supabase.rpc(
@@ -637,12 +675,13 @@ router.post("/posts/video/complete", verifyToken, async (req, res) => {
     );
 
     if (rpcError) {
-      console.error("Error fetching complete post:", rpcError);
+      console.error("[Video Complete] Error fetching enriched post:", rpcError);
     }
 
+    console.log(`[Video Complete] Success - returning post ${post.id}`);
     res.status(201).json(completePost?.[0] || post);
   } catch (error) {
-    console.error("Error creating video post:", error);
+    console.error("[Video Complete] Error:", error);
     res.status(500).json({ message: "Failed to create video post" });
   }
 });
