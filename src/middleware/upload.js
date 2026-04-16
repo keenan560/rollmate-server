@@ -46,7 +46,10 @@ const postVideoUpload = multer({
     fileSize: 50 * 1024 * 1024, // 50MB limit (Supabase free tier limit)
   },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith("video/")) {
+    if (
+      file.mimetype.startsWith("video/") ||
+      (file.fieldname === "thumbnail" && file.mimetype.startsWith("image/"))
+    ) {
       return cb(null, true);
     } else {
       cb(new Error("Only video files are allowed!"));
