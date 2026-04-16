@@ -579,6 +579,7 @@ router.post("/posts/video/signed-url", verifyToken, async (req, res) => {
     );
 
     let thumbnailUploadUrl = null;
+    let thumbnailToken = null;
     let thumbnailPath = null;
 
     // Generate signed URL for thumbnail if needed
@@ -595,6 +596,7 @@ router.post("/posts/video/signed-url", verifyToken, async (req, res) => {
         );
       } else {
         thumbnailUploadUrl = thumbData.signedUrl;
+        thumbnailToken = thumbData.token;
         console.log(
           `[Video Signed URL] Thumbnail signed URL created for path: ${thumbnailPath}`,
         );
@@ -604,8 +606,10 @@ router.post("/posts/video/signed-url", verifyToken, async (req, res) => {
     console.log(`[Video Signed URL] Success - returning signed URLs to client`);
     res.json({
       videoUploadUrl: videoData.signedUrl,
+      videoToken: videoData.token,
       videoPath,
       thumbnailUploadUrl,
+      thumbnailToken,
       thumbnailPath,
     });
   } catch (error) {
