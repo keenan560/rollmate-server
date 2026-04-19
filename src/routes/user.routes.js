@@ -621,13 +621,32 @@ router.post("/deleteUser", verifyToken, async (req, res, next) => {
 
     console.log(`Found ${mediaFilesToDelete.length} media files to delete`);
 
-    // 1. Delete chat messages sent by user
+    // 1. Nullify reply references to this user's messages, then delete
+    const { data: userMessageIds } = await supabase
+      .from("chat_messages")
+      .select("id")
+      .eq("sender_id", userId);
+    if (userMessageIds && userMessageIds.length > 0) {
+      const ids = userMessageIds.map((m) => m.id);
+      const { error: nullifyError } = await supabase
+        .from("chat_messages")
+        .update({ reply_to_id: null })
+        .in("reply_to_id", ids);
+      if (nullifyError) throw nullifyError;
+    }
     const { error: chatMessagesError } = await supabase
       .from("chat_messages")
       .delete()
       .eq("sender_id", userId);
     if (chatMessagesError) throw chatMessagesError;
     console.log("Deleted chat messages");
+
+    // 1b. Delete deleted_chats records
+    const { error: deletedChatsError } = await supabase
+      .from("deleted_chats")
+      .delete()
+      .eq("user_id", userId);
+    if (deletedChatsError) throw deletedChatsError;
 
     // 2. Delete chats where user is involved (via roll_requests)
     // First get all roll requests involving this user
@@ -754,7 +773,73 @@ router.post("/deleteUser", verifyToken, async (req, res, next) => {
     if (availabilityError) throw availabilityError;
     console.log("Deleted availability");
 
-    // 8. Finally, delete the user
+    // 8. Delete training logs (nullify partner refs first)
+    const { error: trainingPartnerError } = await supabase
+      .from("training_logs")
+      .update({ partner_id: null })
+      .eq("partner_id", userId);
+    if (trainingPartnerError) throw trainingPartnerError;
+    const { error: trainingLogsError } = await supabase
+      .from("training_logs")
+      .delete()
+      .eq("user_id", userId);
+    if (trainingLogsError) throw trainingLogsError;
+    console.log("Deleted training logs");
+
+    // 9. Delete event RSVPs and events
+    const { error: eventRsvpsError } = await supabase
+      .from("event_rsvps")
+      .delete()
+      .eq("user_id", userId);
+    if (eventRsvpsError) throw eventRsvpsError;
+    const { error: eventsError } = await supabase
+      .from("events")
+      .delete()
+      .eq("creator_id", userId);
+    if (eventsError) throw eventsError;
+    console.log("Deleted events");
+
+    // 10. Delete notifications
+    const { error: notificationsError } = await supabase
+      .from("notifications")
+      .delete()
+      .eq("user_id", userId);
+    if (notificationsError) throw notificationsError;
+    const { error: actorNotificationsError } = await supabase
+      .from("notifications")
+      .delete()
+      .eq("actor_id", userId);
+    if (actorNotificationsError) throw actorNotificationsError;
+    console.log("Deleted notifications");
+
+    // 11. Delete support tickets
+    const { error: supportTicketsError } = await supabase
+      .from("support_tickets")
+      .delete()
+      .eq("user_id", userId);
+    if (supportTicketsError) throw supportTicketsError;
+
+    // 12. Delete belt progress and custom techniques
+    const { error: beltProgressError } = await supabase
+      .from("belt_progress")
+      .delete()
+      .eq("user_id", userId);
+    if (beltProgressError) throw beltProgressError;
+    const { error: customTechniquesError } = await supabase
+      .from("custom_techniques")
+      .delete()
+      .eq("user_id", userId);
+    if (customTechniquesError) throw customTechniquesError;
+
+    // 13. Delete blocked users
+    const { error: blockedUsersError } = await supabase
+      .from("blocked_users")
+      .delete()
+      .or(`user_id.eq.${userId},blocked_user_id.eq.${userId}`);
+    if (blockedUsersError) throw blockedUsersError;
+    console.log("Deleted remaining user data");
+
+    // 14. Finally, delete the user
     const { data, error } = await supabase
       .from("users")
       .delete()
