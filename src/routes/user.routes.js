@@ -51,16 +51,11 @@ router.get("/check-user", verifyToken, async (req, res, next) => {
 router.post("/register", verifyToken, async (req, res, next) => {
   console.log("Received request body:", req.body);
   try {
-    if (
-      !req.body.location ||
-      !req.body.location.lat ||
-      !req.body.location.lng
-    ) {
-      return res.status(400).json({
-        error: "Location data is required",
-        details: "Please provide latitude and longitude coordinates",
-      });
-    }
+    // Location is optional - app must be fully functional without it (App Store guideline 5.1.5)
+    const location =
+      req.body.location && req.body.location.lat && req.body.location.lng
+        ? req.body.location
+        : null;
 
     let avatarUrl = req.user.picture;
     if (req.body.profilePhoto && req.body.profilePhoto !== req.user.picture) {
@@ -68,7 +63,9 @@ router.post("/register", verifyToken, async (req, res, next) => {
       avatarUrl = req.body.profilePhoto;
     }
 
-    const locationPoint = `POINT(${req.body.location.lng} ${req.body.location.lat})`;
+    const locationPoint = location
+      ? `POINT(${location.lng} ${location.lat})`
+      : null;
     const weightRangeMin = req.body.weight - 20;
     const weightRangeMax = req.body.weight + 20;
 
@@ -78,14 +75,14 @@ router.post("/register", verifyToken, async (req, res, next) => {
       last_name: req.body.last_name,
       email: req.user.email,
       avatar_url: avatarUrl,
-      gender: req.body.gender,
+      gender: req.body.gender || null,
       age: req.body.age || 0,
       weight: req.body.weight,
       belt: req.body.belt,
       stripes: parseInt(req.body.stripes) || 0,
       bjj_start_year: req.body.bjj_start_year,
       height: req.body.height,
-      dob: req.body.dob,
+      dob: req.body.dob || null,
       primary_gym: req.body.primary_gym,
       style_preference: "both",
       competition_experience: false,
@@ -97,7 +94,7 @@ router.post("/register", verifyToken, async (req, res, next) => {
       looking_for_roll: req.body.looking_for_roll || false,
       available_now: req.body.available_now || false,
       location: locationPoint,
-      city: req.body.location.city || "Unknown",
+      city: location ? location.city || "Unknown" : null,
       fcm_token: req.body.fcm_token || null,
     };
 
