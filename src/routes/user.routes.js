@@ -82,7 +82,13 @@ router.post("/register", verifyToken, async (req, res, next) => {
       stripes: parseInt(req.body.stripes) || 0,
       bjj_start_year: req.body.bjj_start_year,
       height: req.body.height,
-      dob: req.body.dob || null,
+      dob:
+        req.body.dob &&
+        req.body.dob.day &&
+        req.body.dob.month &&
+        req.body.dob.year
+          ? req.body.dob
+          : null,
       primary_gym: req.body.primary_gym,
       style_preference: "both",
       competition_experience: false,
