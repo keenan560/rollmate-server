@@ -657,6 +657,44 @@ router.delete("/chat-messages/:messageId", verifyToken, async (req, res) => {
   }
 });
 
+// POST /chat-messages/:messageId/react — Add or remove a reaction on a message
+router.post(
+  "/chat-messages/:messageId/react",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const { messageId } = req.params;
+      const { reaction } = req.body;
+
+      // Allow null/empty to remove reaction
+      const reactionValue = reaction || null;
+
+      const { data, error } = await supabase
+        .from("chat_messages")
+        .update({ reaction: reactionValue })
+        .eq("id", messageId)
+        .select("id, reaction")
+        .single();
+
+      if (error) {
+        console.error("Error updating reaction:", error);
+        return res
+          .status(500)
+          .json({ error: "Failed to update reaction", message: error.message });
+      }
+
+      if (!data) {
+        return res.status(404).json({ error: "Message not found" });
+      }
+
+      res.json({ success: true, id: data.id, reaction: data.reaction });
+    } catch (error) {
+      console.error("Error in POST /chat-messages/:messageId/react:", error);
+      res.status(500).json({ error: "Failed to update reaction" });
+    }
+  },
+);
+
 // DELETE /chats/:chatId — Delete a conversation for current user
 router.delete("/chats/:chatId", verifyToken, async (req, res) => {
   try {

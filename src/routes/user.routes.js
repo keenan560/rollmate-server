@@ -999,7 +999,7 @@ router.post("/users/online-status", verifyToken, async (req, res) => {
 
     const { data, error } = await supabase
       .from("users")
-      .update({ is_online })
+      .update({ is_online, last_active_at: new Date().toISOString() })
       .eq("id", userId)
       .select()
       .single();
