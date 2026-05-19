@@ -329,7 +329,7 @@ router.get("/chat-messages/unread-count", verifyToken, async (req, res) => {
       .in("chat_id", activeChatIds)
       .neq("sender_id", userId)
       .is("read_at", null)
-      .is("deleted_for_everyone", null);
+      .eq("deleted_for_everyone", false);
 
     if (countError) throw countError;
 
@@ -805,7 +805,7 @@ router.get("/conversations", verifyToken, async (req, res) => {
       .in("chat_id", chatIds)
       .neq("sender_id", userId)
       .is("read_at", null)
-      .is("deleted_for_everyone", null);
+      .eq("deleted_for_everyone", false);
 
     const unreadCountMap = {};
     (unreadMessages || []).forEach((m) => {
