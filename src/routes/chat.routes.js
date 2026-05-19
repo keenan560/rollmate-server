@@ -278,6 +278,68 @@ router.post(
   },
 );
 
+// GET /chat-messages/unread-count — Get total unread message count across all chats
+router.get("/chat-messages/unread-count", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+
+    // Get all chats the user is part of
+    const { data: friendships, error: friendError } = await supabase
+      .from("roll_requests")
+      .select("id")
+      .eq("status", "accepted")
+      .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`);
+
+    if (friendError) throw friendError;
+    if (!friendships || friendships.length === 0) {
+      return res.json({ count: 0 });
+    }
+
+    const rollRequestIds = friendships.map((f) => f.id);
+
+    const { data: chats, error: chatError } = await supabase
+      .from("chats")
+      .select("id")
+      .in("roll_request_id", rollRequestIds);
+
+    if (chatError) throw chatError;
+    if (!chats || chats.length === 0) {
+      return res.json({ count: 0 });
+    }
+
+    // Get deleted chat IDs for this user
+    const { data: deletedChats } = await supabase
+      .from("deleted_chats")
+      .select("chat_id")
+      .eq("user_id", userId);
+
+    const deletedChatIds = new Set((deletedChats || []).map((d) => d.chat_id));
+    const activeChatIds = chats
+      .filter((c) => !deletedChatIds.has(c.id))
+      .map((c) => c.id);
+
+    if (activeChatIds.length === 0) {
+      return res.json({ count: 0 });
+    }
+
+    // Count unread messages (not sent by user, not read, not deleted)
+    const { count, error: countError } = await supabase
+      .from("chat_messages")
+      .select("*", { count: "exact", head: true })
+      .in("chat_id", activeChatIds)
+      .neq("sender_id", userId)
+      .is("read_at", null)
+      .is("deleted_for_everyone", null);
+
+    if (countError) throw countError;
+
+    res.json({ count: count || 0 });
+  } catch (error) {
+    console.error("Error in GET /chat-messages/unread-count:", error);
+    res.status(500).json({ error: "Failed to fetch unread count" });
+  }
+});
+
 // Get chat messages
 router.get("/chat-messages/:rollRequestId", verifyToken, async (req, res) => {
   const { rollRequestId } = req.params;
@@ -698,6 +760,20 @@ router.get("/conversations", verifyToken, async (req, res) => {
       .in("chat_id", chatIds)
       .order("created_at", { ascending: false });
 
+    // Get unread counts per chat (messages not sent by user, not read)
+    const { data: unreadMessages } = await supabase
+      .from("chat_messages")
+      .select("chat_id")
+      .in("chat_id", chatIds)
+      .neq("sender_id", userId)
+      .is("read_at", null)
+      .is("deleted_for_everyone", null);
+
+    const unreadCountMap = {};
+    (unreadMessages || []).forEach((m) => {
+      unreadCountMap[m.chat_id] = (unreadCountMap[m.chat_id] || 0) + 1;
+    });
+
     // Group by chat_id and pick the first visible message per chat
     const lastMessageMap = {};
     (lastMessages || []).forEach((m) => {
@@ -755,7 +831,7 @@ router.get("/conversations", verifyToken, async (req, res) => {
               ),
             }
           : null,
-        unread_count: 0,
+        unread_count: unreadCountMap[chat.id] || 0,
         last_message_at: chat.last_message_at || chat.created_at,
       };
     });
@@ -771,6 +847,37 @@ router.get("/conversations", verifyToken, async (req, res) => {
     res
       .status(500)
       .json({ error: "Failed to fetch conversations", message: error.message });
+  }
+});
+
+// POST /chat-messages/read — Mark messages as read in a chat
+router.post("/chat-messages/read", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { chat_id } = req.body;
+
+    if (!chat_id) {
+      return res.status(400).json({ error: "chat_id is required" });
+    }
+
+    // Mark all unread messages in this chat that were NOT sent by the current user
+    const { data, error } = await supabase
+      .from("chat_messages")
+      .update({ read_at: new Date().toISOString() })
+      .eq("chat_id", chat_id)
+      .neq("sender_id", userId)
+      .is("read_at", null)
+      .select("id");
+
+    if (error) {
+      console.error("Error marking messages as read:", error);
+      return res.status(500).json({ error: "Failed to mark messages as read" });
+    }
+
+    res.json({ success: true, marked_count: data ? data.length : 0 });
+  } catch (error) {
+    console.error("Error in POST /chat-messages/read:", error);
+    res.status(500).json({ error: "Failed to mark messages as read" });
   }
 });
 
