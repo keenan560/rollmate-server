@@ -9,7 +9,7 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, "base64").toString(),
   );
 } else {
-  serviceAccount = require("../../roll-mate-firebase-adminsdk-dvpro-08ec4a8e36.json");
+  serviceAccount = require("../../roll-mate-firebase-adminsdk-dvpro-1be56750ac.json");
 }
 
 admin.initializeApp({

@@ -31,7 +31,7 @@ Backend proxy endpoints for Google Places API to search for BJJ gyms and retriev
 
 Add to your `.env` file:
 ```bash
-GOOGLE_PLACES_API_KEY=AIzaSyABClFW7uWhy4aEGHqVtJiqs7UWyw_PQN8
+GOOGLE_PLACES_API_KEY=your_google_places_api_key_here
 ```
 
 ## API Endpoints

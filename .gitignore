@@ -132,5 +132,9 @@ dist
 # Backup files
 *.backup
 
+# Firebase service account keys
+*-firebase-adminsdk-*.json
+*-prod-firebase-adminsdk-*.json
+
 # Uploads directory
 uploads/
