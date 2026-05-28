@@ -1155,4 +1155,38 @@ router.post("/unblock-user", verifyToken, async (req, res) => {
   }
 });
 
+// POST /users/onboarding-seen — Mark onboarding as completed
+router.post("/users/onboarding-seen", verifyToken, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("users")
+      .update({ has_seen_onboarding: true })
+      .eq("id", req.user.uid);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Error updating onboarding status:", error);
+    res.status(500).json({ error: "Failed to update onboarding status" });
+  }
+});
+
+// DELETE /users/onboarding-seen — Reset onboarding (for replay)
+router.delete("/users/onboarding-seen", verifyToken, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("users")
+      .update({ has_seen_onboarding: false })
+      .eq("id", req.user.uid);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Error resetting onboarding status:", error);
+    res.status(500).json({ error: "Failed to reset onboarding status" });
+  }
+});
+
 module.exports = router;
