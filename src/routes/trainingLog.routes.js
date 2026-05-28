@@ -129,15 +129,40 @@ router.post("/training-logs", verifyToken, async (req, res) => {
           f.sender_id === req.user.uid ? f.receiver_id : f.sender_id,
         );
 
+        const trainingTypeLabels = {
+          open_mat: "Open Mat",
+          gi: "Gi",
+          nogi: "No-Gi",
+          no_gi: "No-Gi",
+          competition_prep: "Comp Prep",
+          drilling: "Drilling",
+          private: "Private",
+          both: "Gi & No-Gi",
+          seminar: "Seminar",
+          self_study: "Self Study",
+        };
+
+        const formattedType =
+          trainingTypeLabels[training_type] || training_type;
+
         const body = partner_id
-          ? `Logged a ${training_type} session with a training partner`
-          : `Logged a ${duration_minutes}min ${training_type} session`;
+          ? `Logged a ${formattedType} session with a training partner`
+          : `Logged a ${duration_minutes}min ${formattedType} session`;
 
         // Send push notifications
         for (const friendId of friendIds) {
           sendNotification(
             friendId,
             `${user.first_name} just trained 🥋 — ${body}`,
+            {
+              title: `${user.first_name} just trained 🥋`,
+              data: {
+                type: "session",
+                training_log_id: String(data.id),
+                user_id: req.user.uid,
+                user_name: `${user.first_name} ${user.last_name}`,
+              },
+            },
           ).catch(() => {});
         }
 

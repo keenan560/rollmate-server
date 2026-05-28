@@ -3,6 +3,7 @@ const router = express.Router();
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { optimizeUserImages } = require("../utils/imageOptimization");
+const { sendNotification } = require("../services/notification");
 
 // POST /roll-requests - Send a roll request
 router.post("/roll-requests", verifyToken, async (req, res) => {
@@ -35,6 +36,33 @@ router.post("/roll-requests", verifyToken, async (req, res) => {
 
     // TODO: Send push notification to recipient
     // This would integrate with Firebase Cloud Messaging
+
+    // Send push notification to recipient
+    try {
+      const { data: sender } = await supabase
+        .from("users")
+        .select("first_name, last_name")
+        .eq("id", senderId)
+        .single();
+
+      if (sender) {
+        sendNotification(
+          recipientId,
+          `${sender.first_name} ${sender.last_name} sent you a roll request!`,
+          {
+            title: "New Roll Request",
+            data: {
+              type: "roll_request",
+              roll_request_id: String(rollRequest.id),
+              user_id: senderId,
+              user_name: `${sender.first_name} ${sender.last_name}`,
+            },
+          },
+        ).catch((err) => console.error("Push notification error:", err));
+      }
+    } catch (pushErr) {
+      console.error("Error sending roll request push:", pushErr);
+    }
 
     res.json({
       success: true,
@@ -77,7 +105,32 @@ router.put("/roll-requests/:id/accept", verifyToken, async (req, res) => {
       return res.status(500).json({ error: "Failed to accept request" });
     }
 
-    // TODO: Send notification to sender that request was accepted
+    // Send push notification to sender that request was accepted
+    try {
+      const { data: accepter } = await supabase
+        .from("users")
+        .select("first_name, last_name")
+        .eq("id", userId)
+        .single();
+
+      if (accepter) {
+        sendNotification(
+          request.sender_id,
+          `${accepter.first_name} accepted your roll request!`,
+          {
+            title: "Roll Request Accepted",
+            data: {
+              type: "roll_request",
+              roll_request_id: String(requestId),
+              user_id: userId,
+              user_name: `${accepter.first_name} ${accepter.last_name}`,
+            },
+          },
+        ).catch((err) => console.error("Push notification error:", err));
+      }
+    } catch (pushErr) {
+      console.error("Error sending accept push:", pushErr);
+    }
 
     res.json({ success: true });
   } catch (error) {

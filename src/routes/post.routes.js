@@ -6,6 +6,7 @@ const { verifyToken } = require("../middleware/auth");
 const { postImageUpload, postVideoUpload } = require("../middleware/upload");
 const { generateLinkPreview } = require("../utils/linkPreview");
 const { optimizePostImages } = require("../utils/imageOptimization");
+const { sendNotification } = require("../services/notification");
 
 // Get link preview
 router.post("/posts/link-preview", verifyToken, async (req, res) => {
@@ -926,6 +927,41 @@ router.post("/posts/:postId/like", verifyToken, async (req, res) => {
       .eq("post_id", postId);
 
     res.json({ success: true, likes_count: count });
+
+    // Send push notification to post author (fire and forget)
+    try {
+      const { data: post } = await supabase
+        .from("posts")
+        .select("user_id")
+        .eq("id", postId)
+        .single();
+
+      if (post && post.user_id !== currentUserId) {
+        const { data: liker } = await supabase
+          .from("users")
+          .select("first_name, last_name")
+          .eq("id", currentUserId)
+          .single();
+
+        if (liker) {
+          sendNotification(
+            post.user_id,
+            `${liker.first_name} ${liker.last_name} liked your post`,
+            {
+              title: "New Like ❤️",
+              data: {
+                type: "like",
+                post_id: String(postId),
+                user_id: currentUserId,
+                user_name: `${liker.first_name} ${liker.last_name}`,
+              },
+            },
+          ).catch((err) => console.error("Like push error:", err));
+        }
+      }
+    } catch (pushErr) {
+      console.error("Error sending like push:", pushErr);
+    }
   } catch (error) {
     console.error("Error in /posts/:postId/like endpoint:", error);
     res.status(500).json({
@@ -1044,6 +1080,46 @@ router.post("/posts/:postId/comments", verifyToken, async (req, res) => {
     });
 
     res.status(201).json(completeComment[0] || data);
+
+    // Send push notification to post author (fire and forget)
+    try {
+      const { data: post } = await supabase
+        .from("posts")
+        .select("user_id")
+        .eq("id", postId)
+        .single();
+
+      if (post && post.user_id !== currentUserId) {
+        const { data: commenter } = await supabase
+          .from("users")
+          .select("first_name, last_name")
+          .eq("id", currentUserId)
+          .single();
+
+        if (commenter) {
+          const preview =
+            content.trim().length > 50
+              ? content.trim().substring(0, 50) + "..."
+              : content.trim();
+
+          sendNotification(
+            post.user_id,
+            `${commenter.first_name} ${commenter.last_name} commented: "${preview}"`,
+            {
+              title: "New Comment 💬",
+              data: {
+                type: "comment",
+                post_id: String(postId),
+                user_id: currentUserId,
+                user_name: `${commenter.first_name} ${commenter.last_name}`,
+              },
+            },
+          ).catch((err) => console.error("Comment push error:", err));
+        }
+      }
+    } catch (pushErr) {
+      console.error("Error sending comment push:", pushErr);
+    }
   } catch (error) {
     console.error("Error in /posts/:postId/comments POST endpoint:", error);
     res.status(500).json({

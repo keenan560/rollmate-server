@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
+const { sendNotification } = require("../services/notification");
 
 // Helper function to check and auto-verify belt
 async function checkAndAutoVerifyBelt(userId) {
@@ -201,6 +202,34 @@ router.post(
         count: allEndorsements?.length || 0,
         auto_verified: wasAutoVerified,
       });
+
+      // Send push notification to the endorsed user (fire and forget)
+      try {
+        const { data: endorser } = await supabase
+          .from("users")
+          .select("first_name, last_name")
+          .eq("id", currentUserId)
+          .single();
+
+        if (endorser) {
+          const pushBody = wasAutoVerified
+            ? `Your ${user.belt} belt is now verified! 🎉`
+            : `${endorser.first_name} ${endorser.last_name} endorsed your ${user.belt} belt`;
+
+          sendNotification(userId, pushBody, {
+            title: wasAutoVerified
+              ? "Belt Verified! 🥋"
+              : "New Belt Endorsement 🤝",
+            data: {
+              type: "endorsement",
+              user_id: currentUserId,
+              user_name: `${endorser.first_name} ${endorser.last_name}`,
+            },
+          }).catch((err) => console.error("Belt endorsement push error:", err));
+        }
+      } catch (pushErr) {
+        console.error("Error sending belt endorsement push:", pushErr);
+      }
     } catch (error) {
       console.error("Error endorsing belt:", error);
       res.status(500).json({

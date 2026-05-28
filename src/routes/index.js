@@ -18,6 +18,7 @@ const trainingLogRoutes = require("./trainingLog.routes");
 const beltProgressRoutes = require("./beltProgress.routes");
 const customTechniquesRoutes = require("./customTechniques.routes");
 const notificationRoutes = require("./notification.routes");
+const pushNotificationRoutes = require("./pushNotification.routes");
 const eventRoutes = require("./event.routes");
 
 // Mount routes
@@ -38,6 +39,7 @@ router.use("/", trainingLogRoutes);
 router.use("/", beltProgressRoutes);
 router.use("/", customTechniquesRoutes);
 router.use("/", notificationRoutes);
+router.use("/", pushNotificationRoutes);
 router.use("/", eventRoutes);
 
 module.exports = router;

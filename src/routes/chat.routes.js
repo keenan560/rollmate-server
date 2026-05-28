@@ -8,6 +8,7 @@ const {
   optimizeImageUrl,
   optimizeUserImages,
 } = require("../utils/imageOptimization");
+const { sendNotification } = require("../services/notification");
 
 // Get link preview for chat
 router.post("/chat/link-preview", verifyToken, async (req, res) => {
@@ -268,6 +269,32 @@ router.post(
         .eq("user_id", otherUserId);
 
       res.status(200).json(data);
+
+      // Send push notification to the other user (fire and forget)
+      try {
+        const senderName = data.sender
+          ? `${data.sender.first_name} ${data.sender.last_name}`
+          : "Someone";
+        const previewText =
+          imageUrls.length > 0 && !message
+            ? "📷 Sent a photo"
+            : message.length > 100
+              ? message.substring(0, 100) + "..."
+              : message || "📷 Sent a photo";
+
+        sendNotification(otherUserId, previewText, {
+          title: senderName,
+          data: {
+            type: "message",
+            chat_id: String(chatData.id),
+            roll_request_id: String(chatData.roll_request_id || rollRequestId),
+            user_id: req.user.uid,
+            user_name: senderName,
+          },
+        });
+      } catch (pushError) {
+        console.error("Error sending chat push notification:", pushError);
+      }
     } catch (error) {
       console.error("Error sending message:", error);
       res.status(500).json({

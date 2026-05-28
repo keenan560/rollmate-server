@@ -68,6 +68,15 @@ router.post("/roll-request", verifyToken, async (req, res) => {
     await sendNotification(
       req.body.receiver_id,
       `${senderData.first_name} ${senderData.last_name} wants to be friends!`,
+      {
+        title: "New Friend Request",
+        data: {
+          type: "roll_request",
+          roll_request_id: String(data.id),
+          user_id: req.user.uid,
+          user_name: `${senderData.first_name} ${senderData.last_name}`,
+        },
+      },
     );
 
     // Create in-app notification (fire and forget)
@@ -246,6 +255,15 @@ router.post(
             await sendNotification(
               request.sender.id,
               `${request.receiver.first_name} accepted your friend request!`,
+              {
+                title: "Friend Request Accepted",
+                data: {
+                  type: "roll_request",
+                  roll_request_id: String(requestId),
+                  user_id: request.receiver.id,
+                  user_name: `${request.receiver.first_name} ${request.receiver.last_name}`,
+                },
+              },
             );
           } catch (notificationError) {
             console.warn("Notification error:", notificationError);
@@ -296,6 +314,15 @@ router.post(
           await sendNotification(
             request.sender.id,
             `${request.receiver.first_name} has declined your roll request`,
+            {
+              title: "Request Declined",
+              data: {
+                type: "roll_request",
+                roll_request_id: String(requestId),
+                user_id: request.receiver.id,
+                user_name: `${request.receiver.first_name} ${request.receiver.last_name}`,
+              },
+            },
           );
         } catch (notificationError) {
           console.warn("Notification error:", notificationError);
@@ -315,11 +342,29 @@ router.post(
             await sendNotification(
               otherUserId,
               `${currentUserName} has removed you as a friend`,
+              {
+                title: "Friend Removed",
+                data: {
+                  type: "roll_request",
+                  roll_request_id: String(requestId),
+                  user_id: req.user.uid,
+                  user_name: currentUserName,
+                },
+              },
             );
           } else {
             await sendNotification(
               request.receiver.id,
               `${request.sender.first_name} has cancelled their roll request`,
+              {
+                title: "Request Cancelled",
+                data: {
+                  type: "roll_request",
+                  roll_request_id: String(requestId),
+                  user_id: request.sender.id,
+                  user_name: `${request.sender.first_name} ${request.sender.last_name}`,
+                },
+              },
             );
           }
         } catch (notificationError) {

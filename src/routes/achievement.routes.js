@@ -2,6 +2,10 @@ const express = require("express");
 const router = express.Router();
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
+const {
+  sendNotification,
+  sendNotificationToMany,
+} = require("../services/notification");
 
 // ============================================
 // ACHIEVEMENT CRUD
@@ -100,7 +104,7 @@ router.post("/achievements", verifyToken, async (req, res) => {
           .select("sender_id, receiver_id")
           .eq("status", "accepted")
           .or(`sender_id.eq.${currentUserId},receiver_id.eq.${currentUserId}`)
-          .then(({ data: friends }) => {
+          .then(async ({ data: friends }) => {
             const friendIds = (friends || []).map((f) =>
               f.sender_id === currentUserId ? f.receiver_id : f.sender_id,
             );
@@ -115,7 +119,22 @@ router.post("/achievements", verifyToken, async (req, res) => {
               actor_avatar: user.avatar_url,
               reference_id: data.id,
             }));
-            return supabase.from("notifications").insert(notifications);
+            await supabase.from("notifications").insert(notifications);
+
+            // Send push notifications to friends
+            sendNotificationToMany(
+              friendIds,
+              data.competition_name || "New competition result",
+              {
+                title: `${user.first_name} earned an achievement 🏆`,
+                data: {
+                  type: "achievement",
+                  achievement_id: String(data.id),
+                  user_id: currentUserId,
+                  user_name: `${user.first_name} ${user.last_name}`,
+                },
+              },
+            ).catch((err) => console.error("Achievement push error:", err));
           });
       })
       .catch((err) =>
@@ -333,6 +352,31 @@ router.post(
         .select("*")
         .eq("id", achievementId)
         .single();
+
+      // Send push notification to achievement owner (fire and forget)
+      if (achievement?.user_id !== currentUserId) {
+        const { data: endorser } = await supabase
+          .from("users")
+          .select("first_name, last_name")
+          .eq("id", currentUserId)
+          .single();
+
+        if (endorser) {
+          sendNotification(
+            achievement.user_id,
+            `${endorser.first_name} ${endorser.last_name} endorsed your achievement`,
+            {
+              title: "New Endorsement 🤝",
+              data: {
+                type: "endorsement",
+                achievement_id: String(achievementId),
+                user_id: currentUserId,
+                user_name: `${endorser.first_name} ${endorser.last_name}`,
+              },
+            },
+          ).catch((err) => console.error("Endorsement push error:", err));
+        }
+      }
 
       res.json({ endorsement, achievement: updatedAchievement });
     } catch (error) {

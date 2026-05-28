@@ -4,6 +4,10 @@ const path = require("path");
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { postImageUpload } = require("../middleware/upload");
+const {
+  sendNotification,
+  sendNotificationToMany,
+} = require("../services/notification");
 
 const VALID_EVENT_TYPES = [
   "open_mat",
@@ -229,6 +233,19 @@ router.post("/events", verifyToken, async (req, res) => {
         reference_id: event.id,
       }));
       await supabase.from("notifications").insert(notifications);
+
+      // Send push notifications to friends (fire and forget)
+      sendNotificationToMany(friendIds, title.trim(), {
+        title: `${user.first_name} created an event 📅`,
+        data: {
+          type: "event",
+          event_id: String(event.id),
+          user_id: userId,
+          user_name: `${user.first_name} ${user.last_name}`,
+        },
+      }).catch((err) =>
+        console.error("Error sending event push notifications:", err),
+      );
     }
 
     const [enriched] = await enrichEvents([event], userId);
@@ -509,7 +526,8 @@ router.post("/events/:eventId/rsvp", verifyToken, async (req, res) => {
         .single()
         .then(({ data: user }) => {
           if (!user) return;
-          return supabase.from("notifications").insert({
+          // In-app notification
+          supabase.from("notifications").insert({
             user_id: event.creator_id,
             type: "event_rsvp",
             title: `${user.first_name} is going to your event 🤙`,
@@ -518,6 +536,17 @@ router.post("/events/:eventId/rsvp", verifyToken, async (req, res) => {
             actor_name: `${user.first_name} ${user.last_name}`,
             actor_avatar: user.avatar_url,
             reference_id: eventId,
+          });
+
+          // Push notification
+          sendNotification(event.creator_id, event.title, {
+            title: `${user.first_name} is going to your event 🤙`,
+            data: {
+              type: "event",
+              event_id: String(eventId),
+              user_id: userId,
+              user_name: `${user.first_name} ${user.last_name}`,
+            },
           });
         })
         .catch((err) => console.error("Error sending RSVP notification:", err));
