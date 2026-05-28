@@ -141,6 +141,10 @@ router.get("/training-partners", verifyToken, async (req, res) => {
         );
       }
 
+      // Skip users outside the radius (if we can calculate distance)
+      const maxRadius = parseFloat(radius);
+      const withinRadius = distance === null || distance <= maxRadius;
+
       const userWithDistance = {
         id: user.id,
         first_name: user.first_name,
@@ -156,18 +160,18 @@ router.get("/training-partners", verifyToken, async (req, res) => {
         zip_code: user.zip_code,
       };
 
-      // Available Now (users with available_now toggle)
-      if (user.available_now) {
+      // Available Now (users with available_now toggle AND within radius)
+      if (user.available_now && withinRadius) {
         availableNow.push(userWithDistance);
       }
 
-      // My Gym (users from same primary gym)
-      if (userGym && user.primary_gym === userGym) {
+      // My Gym (users from same primary gym AND within radius)
+      if (userGym && user.primary_gym === userGym && withinRadius) {
         gymMembers.push(userWithDistance);
       }
 
       // Nearby (users within specified radius)
-      if (distance !== null && distance <= parseFloat(radius)) {
+      if (distance !== null && distance <= maxRadius) {
         nearby.push(userWithDistance);
       }
     });
