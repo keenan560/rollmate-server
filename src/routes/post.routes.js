@@ -40,19 +40,21 @@ router.get("/posts", verifyToken, async (req, res) => {
   try {
     const currentUserId = req.user.uid;
     const page = parseInt(req.query.page, 10) || 1;
-    const limit = Math.min(parseInt(req.query.limit, 10) || 15, 30); // Reduced default from 30 to 15, max 30
+    const limit = Math.min(parseInt(req.query.limit, 10) || 30, 50);
     const offset = (page - 1) * limit;
 
     console.log(`Fetching posts - page: ${page}, limit: ${limit}`);
-    const seventyTwoHoursAgo = new Date(
-      Date.now() - 72 * 60 * 60 * 1000,
+
+    // First try recent posts (7 days), if not enough expand to 30 days
+    let sinceDate = new Date(
+      Date.now() - 7 * 24 * 60 * 60 * 1000,
     ).toISOString();
 
     let { data, error } = await supabase.rpc("get_posts_with_details", {
       p_limit: limit,
       p_offset: offset,
       p_current_user_id: currentUserId,
-      p_since: seventyTwoHoursAgo,
+      p_since: sinceDate,
     });
 
     if (error) {
@@ -61,6 +63,25 @@ router.get("/posts", verifyToken, async (req, res) => {
         error: "Failed to fetch posts",
         message: error.message,
       });
+    }
+
+    // If we got fewer than limit, widen the window to 90 days
+    if (data.length < limit) {
+      sinceDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+
+      const { data: moreData, error: moreError } = await supabase.rpc(
+        "get_posts_with_details",
+        {
+          p_limit: limit,
+          p_offset: offset,
+          p_current_user_id: currentUserId,
+          p_since: sinceDate,
+        },
+      );
+
+      if (!moreError && moreData && moreData.length > data.length) {
+        data = moreData;
+      }
     }
 
     // Filter out posts from private users who aren't friends
@@ -97,8 +118,13 @@ router.get("/posts", verifyToken, async (req, res) => {
     // Optimize images in all posts
     const optimizedPosts = data.map((post) => optimizePostImages(post));
 
-    console.log(`Fetched ${optimizedPosts.length} posts (optimized)`);
-    res.json(optimizedPosts);
+    // Return with has_more so client knows whether to keep paginating
+    const has_more = optimizedPosts.length === limit;
+
+    console.log(
+      `Fetched ${optimizedPosts.length} posts (page ${page}, has_more: ${has_more})`,
+    );
+    res.json({ posts: optimizedPosts, page, has_more });
   } catch (error) {
     console.error("Error in /posts endpoint:", error);
     res.status(500).json({

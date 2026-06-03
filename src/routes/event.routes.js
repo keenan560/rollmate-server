@@ -169,6 +169,7 @@ router.post("/events", verifyToken, async (req, res) => {
       longitude,
       external_link,
       cover_image_url,
+      recurrence,
     } = req.body;
 
     if (!title || !title.trim()) {
@@ -186,6 +187,12 @@ router.post("/events", verifyToken, async (req, res) => {
       return res.status(400).json({ error: "location_name is required" });
     }
 
+    const VALID_RECURRENCES = ["once", "weekly", "biweekly", "monthly"];
+    const eventRecurrence =
+      recurrence && VALID_RECURRENCES.includes(recurrence)
+        ? recurrence
+        : "once";
+
     const { data: event, error } = await supabase
       .from("events")
       .insert({
@@ -201,6 +208,7 @@ router.post("/events", verifyToken, async (req, res) => {
         longitude: longitude || null,
         external_link: external_link || null,
         cover_image_url: cover_image_url || null,
+        recurrence: eventRecurrence,
       })
       .select()
       .single();
@@ -656,6 +664,265 @@ router.get("/events/nearby", verifyToken, async (req, res) => {
     res
       .status(500)
       .json({ error: "Failed to fetch nearby events", message: error.message });
+  }
+});
+
+// ==========================================
+// EVENT COMMENTS
+// ==========================================
+
+// GET /events/:eventId/comments — Get comments for an event
+router.get("/events/:eventId/comments", verifyToken, async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+    const offset = (page - 1) * limit;
+
+    const {
+      data: comments,
+      error,
+      count,
+    } = await supabase
+      .from("event_comments")
+      .select("*", { count: "exact" })
+      .eq("event_id", eventId)
+      .order("created_at", { ascending: true })
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      console.error("Error fetching event comments:", error);
+      return res.status(500).json({ error: "Failed to fetch comments" });
+    }
+
+    // Enrich with user info
+    const userIds = [...new Set((comments || []).map((c) => c.user_id))];
+    let userMap = {};
+    if (userIds.length > 0) {
+      const { data: users } = await supabase
+        .from("users")
+        .select("id, first_name, last_name, avatar_url")
+        .in("id", userIds);
+      (users || []).forEach((u) => {
+        userMap[u.id] = u;
+      });
+    }
+
+    const enriched = (comments || []).map((c) => {
+      const user = userMap[c.user_id] || {};
+      return {
+        ...c,
+        user_first_name: user.first_name || null,
+        user_last_name: user.last_name || null,
+        user_avatar_url: user.avatar_url || null,
+      };
+    });
+
+    res.json({ comments: enriched, total: count, page, limit });
+  } catch (error) {
+    console.error("Error in GET /events/:eventId/comments:", error);
+    res.status(500).json({ error: "Failed to fetch comments" });
+  }
+});
+
+// POST /events/:eventId/comments — Add a comment to an event
+router.post("/events/:eventId/comments", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { eventId } = req.params;
+    const { message } = req.body;
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: "message is required" });
+    }
+
+    // Verify event exists
+    const { data: event, error: eventError } = await supabase
+      .from("events")
+      .select("id, creator_id, title")
+      .eq("id", eventId)
+      .eq("is_deleted", false)
+      .single();
+
+    if (eventError || !event) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    const { data: comment, error } = await supabase
+      .from("event_comments")
+      .insert({
+        event_id: eventId,
+        user_id: userId,
+        message: message.trim(),
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error creating event comment:", error);
+      return res.status(500).json({ error: "Failed to post comment" });
+    }
+
+    // Get commenter info for response
+    const { data: user } = await supabase
+      .from("users")
+      .select("first_name, last_name, avatar_url")
+      .eq("id", userId)
+      .single();
+
+    const enriched = {
+      ...comment,
+      user_first_name: user?.first_name || null,
+      user_last_name: user?.last_name || null,
+      user_avatar_url: user?.avatar_url || null,
+    };
+
+    res.status(201).json(enriched);
+
+    // Notify event creator (fire and forget)
+    if (event.creator_id !== userId && user) {
+      sendNotification(event.creator_id, message.trim().substring(0, 100), {
+        title: `${user.first_name} commented on your event 💬`,
+        data: {
+          type: "event_comment",
+          event_id: String(eventId),
+          user_id: userId,
+          user_name: `${user.first_name} ${user.last_name}`,
+        },
+      }).catch((err) =>
+        console.error("Error sending comment notification:", err),
+      );
+    }
+  } catch (error) {
+    console.error("Error in POST /events/:eventId/comments:", error);
+    res.status(500).json({ error: "Failed to post comment" });
+  }
+});
+
+// DELETE /events/:eventId/comments/:commentId — Delete a comment (author or event creator)
+router.delete(
+  "/events/:eventId/comments/:commentId",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const userId = req.user.uid;
+      const { eventId, commentId } = req.params;
+
+      // Get the comment
+      const { data: comment, error: fetchError } = await supabase
+        .from("event_comments")
+        .select("id, user_id, event_id")
+        .eq("id", commentId)
+        .eq("event_id", eventId)
+        .single();
+
+      if (fetchError || !comment) {
+        return res.status(404).json({ error: "Comment not found" });
+      }
+
+      // Check authorization: comment author or event creator can delete
+      if (comment.user_id !== userId) {
+        const { data: event } = await supabase
+          .from("events")
+          .select("creator_id")
+          .eq("id", eventId)
+          .single();
+
+        if (!event || event.creator_id !== userId) {
+          return res
+            .status(403)
+            .json({ error: "Not authorized to delete this comment" });
+        }
+      }
+
+      const { error: deleteError } = await supabase
+        .from("event_comments")
+        .delete()
+        .eq("id", commentId);
+
+      if (deleteError) {
+        console.error("Error deleting comment:", deleteError);
+        return res.status(500).json({ error: "Failed to delete comment" });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error(
+        "Error in DELETE /events/:eventId/comments/:commentId:",
+        error,
+      );
+      res.status(500).json({ error: "Failed to delete comment" });
+    }
+  },
+);
+
+// ==========================================
+// EVENT INVITATIONS
+// ==========================================
+
+// POST /events/:eventId/invite — Invite friends to an event (sends push notification)
+router.post("/events/:eventId/invite", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { eventId } = req.params;
+    const { user_ids } = req.body;
+
+    if (!user_ids || !Array.isArray(user_ids) || user_ids.length === 0) {
+      return res.status(400).json({ error: "user_ids array is required" });
+    }
+
+    // Get event info
+    const { data: event, error: eventError } = await supabase
+      .from("events")
+      .select("id, title, event_date, location_name")
+      .eq("id", eventId)
+      .eq("is_deleted", false)
+      .single();
+
+    if (eventError || !event) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    // Get inviter info
+    const { data: inviter } = await supabase
+      .from("users")
+      .select("first_name, last_name, avatar_url")
+      .eq("id", userId)
+      .single();
+
+    if (!inviter) {
+      return res.status(500).json({ error: "Failed to get user info" });
+    }
+
+    // Send push notifications to invited users
+    const notificationBody = `${event.title} — ${event.location_name}`;
+    const results = await sendNotificationToMany(user_ids, notificationBody, {
+      title: `${inviter.first_name} invited you to an event 📅`,
+      data: {
+        type: "event_invite",
+        event_id: String(eventId),
+        user_id: userId,
+        user_name: `${inviter.first_name} ${inviter.last_name}`,
+      },
+    });
+
+    // Create in-app notifications
+    const notifications = user_ids.map((uid) => ({
+      user_id: uid,
+      type: "event_invite",
+      title: `${inviter.first_name} invited you to an event 📅`,
+      body: event.title,
+      actor_id: userId,
+      actor_name: `${inviter.first_name} ${inviter.last_name}`,
+      actor_avatar: inviter.avatar_url,
+      reference_id: eventId,
+    }));
+    await supabase.from("notifications").insert(notifications);
+
+    res.json({ success: true, invited: user_ids.length, results });
+  } catch (error) {
+    console.error("Error in POST /events/:eventId/invite:", error);
+    res.status(500).json({ error: "Failed to send invitations" });
   }
 });
 

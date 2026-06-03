@@ -6,6 +6,10 @@ const cron = require("node-cron");
 const routes = require("./routes");
 const errorHandler = require("./middleware/errorHandler");
 const { fetchAndPostBJJNews, purgeOldNewsPosts } = require("./services/rss");
+const {
+  fetchAndPostCompetitions,
+  purgeOldCompetitionPosts,
+} = require("./services/competitions");
 const supabase = require("../config");
 
 const app = express();
@@ -35,6 +39,23 @@ setTimeout(() => {
 cron.schedule("0 0 * * *", async () => {
   console.log("Running daily news post cleanup...");
   await purgeOldNewsPosts(30);
+});
+
+// Fetch competitions every 12 hours
+cron.schedule("0 */12 * * *", async () => {
+  console.log("Running scheduled competition fetch...");
+  await fetchAndPostCompetitions();
+});
+
+// Run competition fetch once on server start (delayed)
+setTimeout(() => {
+  fetchAndPostCompetitions();
+}, 15000);
+
+// Purge old competition posts daily at 1am
+cron.schedule("0 1 * * *", async () => {
+  console.log("Running competition post cleanup...");
+  await purgeOldCompetitionPosts(14);
 });
 
 // Purge old notifications daily at 3am (keep unread friend requests)
