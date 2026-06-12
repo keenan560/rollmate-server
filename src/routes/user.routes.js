@@ -5,6 +5,7 @@ const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { profilePicUpload } = require("../middleware/upload");
 const { optimizeUserImages } = require("../utils/imageOptimization");
+const moderation = require("../services/moderation");
 
 // Check if user exists
 router.get("/check-user", verifyToken, async (req, res, next) => {
@@ -399,6 +400,25 @@ router.post("/update-profile", verifyToken, async (req, res) => {
     console.log("Updating profile for user:", userId);
     console.log("Update data:", updateData);
 
+    // Moderate user-facing profile text (display name fields).
+    const profileText = [updateData.first_name, updateData.last_name]
+      .filter((v) => typeof v === "string" && v.trim())
+      .join(" ");
+    if (profileText) {
+      const textMod = await moderation.checkText({
+        text: profileText,
+        surface: "profile_text",
+        userId,
+      });
+      if (!textMod.allowed) {
+        return res.status(422).json({
+          error: "Profile text rejected",
+          code: "MODERATION_BLOCKED_TEXT",
+          details: "This text violates our content policy.",
+        });
+      }
+    }
+
     const updates = {};
     if (updateData.first_name !== undefined)
       updates.first_name = updateData.first_name;
@@ -670,6 +690,25 @@ router.post("/deleteUser", verifyToken, async (req, res, next) => {
     }
 
     // 3. Delete roll requests
+    // First, decrement friends_count for each distinct accepted friend so
+    // their stored count doesn't drift upward when this account is removed.
+    const { data: acceptedFriendships } = await supabase
+      .from("roll_requests")
+      .select("sender_id, receiver_id")
+      .eq("status", "accepted")
+      .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`);
+
+    const friendsToDecrement = new Set();
+    for (const rr of acceptedFriendships || []) {
+      const other = rr.sender_id === userId ? rr.receiver_id : rr.sender_id;
+      if (other && other !== userId) friendsToDecrement.add(other);
+    }
+    for (const friendId of friendsToDecrement) {
+      await supabase.rpc("decrement_friends_count", {
+        user_id_param: friendId,
+      });
+    }
+
     const { error: rollRequestsError } = await supabase
       .from("roll_requests")
       .delete()
@@ -932,6 +971,22 @@ router.post(
 
       const fileBuffer = fs.readFileSync(req.file.path);
       console.log("File read successfully, size:", fileBuffer.length);
+
+      // Content moderation: scan before anything becomes publicly hosted.
+      const modResult = await moderation.checkImage({
+        buffer: fileBuffer,
+        surface: "profile_pic",
+        userId: req.body.userId || null,
+      });
+      if (!modResult.allowed) {
+        fs.unlinkSync(req.file.path);
+        return res.status(422).json({
+          error: "Image rejected",
+          code: "MODERATION_BLOCKED",
+          details:
+            "This image violates our content policy and can't be uploaded.",
+        });
+      }
 
       const fileExtension = req.file.originalname.split(".").pop();
       const uniqueFileName = `profile-pic-${Date.now()}-${Math.random()

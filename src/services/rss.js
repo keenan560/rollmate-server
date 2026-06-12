@@ -1,5 +1,9 @@
 const Parser = require("rss-parser");
 const supabase = require("../../config");
+const {
+  generateLinkPreview,
+  isUnsafeImageHost,
+} = require("../utils/linkPreview");
 
 const parser = new Parser();
 
@@ -234,6 +238,16 @@ async function createNewsPost(article, sourceName) {
       }
     }
 
+    // Drop dead/staging image hosts (e.g. *.cloudwaysapps.com) so they never
+    // reach the client and trigger the image-retry/flicker loop.
+    if (imageUrl && mediaType === "image" && isUnsafeImageHost(imageUrl)) {
+      console.log(
+        `Dropping unsafe image host for "${article.title}": ${imageUrl}`,
+      );
+      imageUrl = null;
+      mediaType = "none";
+    }
+
     const newsTag = sourceName === "UFC News" ? "#UFCNews" : "#BJJNews";
     const content = `${article.title}\n\n${
       article.contentSnippet || ""
@@ -249,6 +263,8 @@ async function createNewsPost(article, sourceName) {
         content: content.substring(0, 1000),
         media_type: mediaType,
         media_url: imageUrl,
+        // Store the preview now so the feed never fetches it per-scroll later.
+        link_preview: await generateLinkPreview(content),
       })
       .select()
       .single();

@@ -7,6 +7,8 @@ const { postImageUpload, postVideoUpload } = require("../middleware/upload");
 const { generateLinkPreview } = require("../utils/linkPreview");
 const { optimizePostImages } = require("../utils/imageOptimization");
 const { sendNotification } = require("../services/notification");
+const moderation = require("../services/moderation");
+const { getFriendIds } = require("../utils/social");
 
 // Get link preview
 router.post("/posts/link-preview", verifyToken, async (req, res) => {
@@ -34,6 +36,77 @@ router.post("/posts/link-preview", verifyToken, async (req, res) => {
     });
   }
 });
+
+// Attach the stored link_preview JSONB to a list of posts in one batched query.
+// No read-time network calls — previews are populated at post-creation time.
+async function attachLinkPreviews(posts) {
+  if (!posts || !posts.length) return posts;
+  const ids = posts.map((p) => p.id);
+  const { data, error } = await supabase
+    .from("posts")
+    .select("id, link_preview")
+    .in("id", ids);
+  if (error) {
+    console.error("Error attaching link previews:", error.message);
+    return posts.map((p) => ({ ...p, link_preview: p.link_preview ?? null }));
+  }
+  const byId = new Map((data || []).map((r) => [r.id, r.link_preview]));
+  return posts.map((p) => ({ ...p, link_preview: byId.get(p.id) ?? null }));
+}
+
+// The feed RPCs expose the like flag as `user_has_liked`, but the client and
+// the single-post endpoint use `is_liked_by_current_user`. Alias it so feed
+// hearts fill correctly. Additive — `user_has_liked` is preserved.
+function normalizeLikeFlag(post) {
+  return {
+    ...post,
+    is_liked_by_current_user:
+      post.user_has_liked ?? post.is_liked_by_current_user ?? false,
+  };
+}
+
+// Attach like_count + is_liked_by_current_user to a list of comments in one
+// batched query (avoids per-comment lookups).
+async function attachCommentLikes(comments, currentUserId) {
+  if (!comments || !comments.length) return comments;
+  const ids = comments.map((c) => c.id);
+
+  const { data: likeRows, error } = await supabase
+    .from("comment_likes")
+    .select("comment_id, user_id")
+    .in("comment_id", ids);
+
+  if (error) {
+    console.error("Error attaching comment likes:", error.message);
+    return comments.map((c) => ({
+      ...c,
+      like_count: c.like_count ?? 0,
+      is_liked_by_current_user: c.is_liked_by_current_user ?? false,
+    }));
+  }
+
+  const counts = new Map();
+  const likedByMe = new Set();
+  for (const row of likeRows || []) {
+    counts.set(row.comment_id, (counts.get(row.comment_id) || 0) + 1);
+    if (row.user_id === currentUserId) likedByMe.add(row.comment_id);
+  }
+
+  return comments.map((c) => ({
+    ...c,
+    like_count: counts.get(c.id) || 0,
+    is_liked_by_current_user: likedByMe.has(c.id),
+  }));
+}
+
+// Recount a comment's likes (used by like/unlike responses).
+async function commentLikeCount(commentId) {
+  const { count } = await supabase
+    .from("comment_likes")
+    .select("*", { count: "exact", head: true })
+    .eq("comment_id", commentId);
+  return count || 0;
+}
 
 // Get posts (Feed)
 router.get("/posts", verifyToken, async (req, res) => {
@@ -116,7 +189,10 @@ router.get("/posts", verifyToken, async (req, res) => {
     }
 
     // Optimize images in all posts
-    const optimizedPosts = data.map((post) => optimizePostImages(post));
+    const withPreviews = await attachLinkPreviews(data);
+    const optimizedPosts = withPreviews.map((post) =>
+      normalizeLikeFlag(optimizePostImages(post)),
+    );
 
     // Return with has_more so client knows whether to keep paginating
     const has_more = optimizedPosts.length === limit;
@@ -164,7 +240,10 @@ router.get("/posts/user/:userId", verifyToken, async (req, res) => {
     }
 
     // Optimize images in all posts
-    const optimizedPosts = data.map((post) => optimizePostImages(post));
+    const withPreviews = await attachLinkPreviews(data);
+    const optimizedPosts = withPreviews.map((post) =>
+      normalizeLikeFlag(optimizePostImages(post)),
+    );
 
     console.log(
       `Found ${optimizedPosts.length} posts for user ${userId} (optimized)`,
@@ -258,6 +337,32 @@ router.post(
 
       console.log("Creating image post for user:", currentUserId);
 
+      // Content moderation before anything is persisted/hosted.
+      const textMod = await moderation.checkText({
+        text: content,
+        surface: "post_text",
+        userId: currentUserId,
+      });
+      if (!textMod.allowed) {
+        return res.status(422).json({
+          error: "Post text rejected",
+          code: "MODERATION_BLOCKED_TEXT",
+          details: "This text violates our content policy.",
+        });
+      }
+      const imgMod = await moderation.checkImage({
+        buffer: req.file.buffer,
+        surface: "post_image",
+        userId: currentUserId,
+      });
+      if (!imgMod.allowed) {
+        return res.status(422).json({
+          error: "Image rejected",
+          code: "MODERATION_BLOCKED",
+          details: "This image violates our content policy.",
+        });
+      }
+
       const fileExt = path.extname(req.file.originalname);
       const fileName = `${currentUserId}_${Date.now()}${fileExt}`;
       const filePath = `${fileName}`;
@@ -290,6 +395,7 @@ router.post(
           content: content.trim(),
           media_type: "image",
           media_url: imageUrl,
+          link_preview: await generateLinkPreview(content),
         })
         .select()
         .single();
@@ -362,6 +468,32 @@ router.post(
         currentUserId,
       );
 
+      // Content moderation before anything is persisted/hosted.
+      const textMod = await moderation.checkText({
+        text: content,
+        surface: "post_text",
+        userId: currentUserId,
+      });
+      if (!textMod.allowed) {
+        return res.status(422).json({
+          error: "Post text rejected",
+          code: "MODERATION_BLOCKED_TEXT",
+          details: "This text violates our content policy.",
+        });
+      }
+      const imgMod = await moderation.checkImages({
+        buffers: req.files.map((f) => f.buffer),
+        surface: "post_image",
+        userId: currentUserId,
+      });
+      if (!imgMod.allowed) {
+        return res.status(422).json({
+          error: "Image rejected",
+          code: "MODERATION_BLOCKED",
+          details: "One of these images violates our content policy.",
+        });
+      }
+
       // Upload all images to Supabase storage
       const imageUrls = [];
       for (const file of req.files) {
@@ -407,6 +539,7 @@ router.post(
           media_type: "image",
           media_url: imageUrls[0], // Primary image
           media_urls: imageUrls, // Array of all images
+          link_preview: await generateLinkPreview(content),
         })
         .select()
         .single();
@@ -475,6 +608,35 @@ router.post(
       const videoFile = req.files.video[0];
       const thumbnailFile = req.files.thumbnail ? req.files.thumbnail[0] : null;
 
+      // Content moderation: caption + thumbnail. Full video moderation is
+      // handled asynchronously (phase 2 / Supabase webhook).
+      const textMod = await moderation.checkText({
+        text: content,
+        surface: "post_text",
+        userId: currentUserId,
+      });
+      if (!textMod.allowed) {
+        return res.status(422).json({
+          error: "Post text rejected",
+          code: "MODERATION_BLOCKED_TEXT",
+          details: "This text violates our content policy.",
+        });
+      }
+      if (thumbnailFile) {
+        const thumbMod = await moderation.checkImage({
+          buffer: thumbnailFile.buffer,
+          surface: "post_video_thumbnail",
+          userId: currentUserId,
+        });
+        if (!thumbMod.allowed) {
+          return res.status(422).json({
+            error: "Video thumbnail rejected",
+            code: "MODERATION_BLOCKED",
+            details: "This video's thumbnail violates our content policy.",
+          });
+        }
+      }
+
       // Upload video
       const videoExt = path.extname(videoFile.originalname);
       const videoFileName = `${currentUserId}_${Date.now()}${videoExt}`;
@@ -539,6 +701,7 @@ router.post(
           media_type: "video",
           media_url: videoUrl,
           video_thumbnail_url: thumbnailUrl,
+          link_preview: await generateLinkPreview(content),
         })
         .select()
         .single();
@@ -658,6 +821,21 @@ router.post("/posts/video/complete", verifyToken, async (req, res) => {
       `[Video Complete] Content: "${content?.substring(0, 50)}${content?.length > 50 ? "..." : ""}"`,
     );
 
+    // Moderate the caption. The video + thumbnail were uploaded directly to
+    // Supabase and are scanned asynchronously (phase 2 / Supabase webhook).
+    const textMod = await moderation.checkText({
+      text: content,
+      surface: "post_text",
+      userId,
+    });
+    if (!textMod.allowed) {
+      return res.status(422).json({
+        error: "Post text rejected",
+        code: "MODERATION_BLOCKED_TEXT",
+        details: "This text violates our content policy.",
+      });
+    }
+
     // Get public URLs
     const { data: videoUrlData } = supabase.storage
       .from("post-videos")
@@ -683,6 +861,7 @@ router.post("/posts/video/complete", verifyToken, async (req, res) => {
         media_type: "video",
         media_url: videoUrlData.publicUrl,
         video_thumbnail_url: thumbnailUrl,
+        link_preview: await generateLinkPreview(content),
       })
       .select()
       .single();
@@ -1034,6 +1213,70 @@ router.delete("/posts/:postId/like", verifyToken, async (req, res) => {
   }
 });
 
+// Get users who liked a post (most recent first)
+router.get("/posts/:postId/likes", verifyToken, async (req, res) => {
+  try {
+    const currentUserId = req.user.uid;
+    const { postId } = req.params;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 30, 50);
+    const offset = (page - 1) * limit;
+
+    const { count } = await supabase
+      .from("post_likes")
+      .select("*", { count: "exact", head: true })
+      .eq("post_id", postId);
+
+    const { data: likeRows, error } = await supabase
+      .from("post_likes")
+      .select("user_id, created_at")
+      .eq("post_id", postId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      console.error("Error fetching post likes:", error);
+      return res
+        .status(500)
+        .json({ error: "Failed to fetch likes", message: error.message });
+    }
+
+    const userIds = (likeRows || []).map((r) => r.user_id);
+    let usersById = new Map();
+    if (userIds.length) {
+      const { data: users } = await supabase
+        .from("users")
+        .select("id, first_name, last_name, avatar_url, belt")
+        .in("id", userIds);
+      usersById = new Map((users || []).map((u) => [u.id, u]));
+    }
+
+    // Flag which likers are friends so the client can surface them first.
+    const friendIds = new Set(await getFriendIds(currentUserId));
+
+    const likes = (likeRows || [])
+      .map((row) => {
+        const u = usersById.get(row.user_id);
+        if (!u) return null;
+        return {
+          id: u.id,
+          first_name: u.first_name,
+          last_name: u.last_name,
+          avatar_url: u.avatar_url,
+          belt: u.belt,
+          liked_at: row.created_at,
+          is_friend: friendIds.has(row.user_id),
+        };
+      })
+      .filter(Boolean);
+
+    res.json({ likes, total: count || 0, page, limit });
+  } catch (error) {
+    console.error("Error in /posts/:postId/likes endpoint:", error);
+    res.status(500).json({ error: "Failed to fetch likes" });
+  }
+});
+
 // Get comments for post
 router.get("/posts/:postId/comments", verifyToken, async (req, res) => {
   try {
@@ -1058,7 +1301,8 @@ router.get("/posts/:postId/comments", verifyToken, async (req, res) => {
       });
     }
 
-    res.json(data);
+    const enriched = await attachCommentLikes(data || [], req.user.uid);
+    res.json(enriched);
   } catch (error) {
     console.error("Error in /posts/:postId/comments endpoint:", error);
     res.status(500).json({
@@ -1081,6 +1325,20 @@ router.post("/posts/:postId/comments", verifyToken, async (req, res) => {
 
     console.log(`User ${currentUserId} commenting on post ${postId}`);
 
+    // Moderate the comment text before persisting.
+    const textMod = await moderation.checkText({
+      text: content,
+      surface: "comment_text",
+      userId: currentUserId,
+    });
+    if (!textMod.allowed) {
+      return res.status(422).json({
+        error: "Comment rejected",
+        code: "MODERATION_BLOCKED_TEXT",
+        details: "This comment violates our content policy.",
+      });
+    }
+
     const { data, error } = await supabase
       .from("post_comments")
       .insert({
@@ -1099,13 +1357,32 @@ router.post("/posts/:postId/comments", verifyToken, async (req, res) => {
       });
     }
 
-    const { data: completeComment } = await supabase.rpc("get_post_comments", {
-      p_post_id: postId,
-      p_limit: 1,
-      p_offset: 0,
-    });
+    // Return the newly created comment in get_post_comments shape (flattened
+    // user fields + like fields), not whatever the RPC happens to order first.
+    const { data: u } = await supabase
+      .from("users")
+      .select("first_name, last_name, avatar_url, belt, belt_verified")
+      .eq("id", currentUserId)
+      .single();
 
-    res.status(201).json(completeComment[0] || data);
+    const shaped = {
+      id: data.id,
+      post_id: data.post_id,
+      user_id: data.user_id,
+      content: data.content,
+      created_at: data.created_at,
+      updated_at: data.updated_at,
+      is_deleted: data.is_deleted,
+      user_first_name: u?.first_name,
+      user_last_name: u?.last_name,
+      user_avatar_url: u?.avatar_url,
+      user_belt: u?.belt,
+      user_belt_verified: u?.belt_verified,
+      like_count: 0,
+      is_liked_by_current_user: false,
+    };
+
+    res.status(201).json(shaped);
 
     // Send push notification to post author (fire and forget)
     try {
@@ -1154,6 +1431,212 @@ router.post("/posts/:postId/comments", verifyToken, async (req, res) => {
     });
   }
 });
+
+// Like a comment
+router.post(
+  "/posts/:postId/comments/:commentId/like",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const currentUserId = req.user.uid;
+      const { commentId } = req.params;
+
+      const { error } = await supabase
+        .from("comment_likes")
+        .insert({ comment_id: commentId, user_id: currentUserId });
+
+      // 23505 = unique violation (already liked) — treat as success (idempotent).
+      if (error && error.code !== "23505") {
+        console.error("Error liking comment:", error);
+        return res
+          .status(500)
+          .json({ error: "Failed to like comment", message: error.message });
+      }
+
+      res.json({
+        success: true,
+        like_count: await commentLikeCount(commentId),
+      });
+    } catch (error) {
+      console.error("Error in comment like endpoint:", error);
+      res.status(500).json({ error: "Failed to like comment" });
+    }
+  },
+);
+
+// Unlike a comment
+router.delete(
+  "/posts/:postId/comments/:commentId/like",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const currentUserId = req.user.uid;
+      const { commentId } = req.params;
+
+      const { error } = await supabase
+        .from("comment_likes")
+        .delete()
+        .eq("comment_id", commentId)
+        .eq("user_id", currentUserId);
+
+      if (error) {
+        console.error("Error unliking comment:", error);
+        return res
+          .status(500)
+          .json({ error: "Failed to unlike comment", message: error.message });
+      }
+
+      res.json({
+        success: true,
+        like_count: await commentLikeCount(commentId),
+      });
+    } catch (error) {
+      console.error("Error in comment unlike endpoint:", error);
+      res.status(500).json({ error: "Failed to unlike comment" });
+    }
+  },
+);
+
+// Edit a comment (author only)
+router.put(
+  "/posts/:postId/comments/:commentId",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const currentUserId = req.user.uid;
+      const { commentId } = req.params;
+      const content = (req.body.content || "").trim();
+
+      if (!content) {
+        return res.status(400).json({ error: "Comment content is required" });
+      }
+
+      const { data: comment, error: fetchError } = await supabase
+        .from("post_comments")
+        .select("id, user_id, is_deleted")
+        .eq("id", commentId)
+        .single();
+
+      if (fetchError || !comment) {
+        return res.status(404).json({ error: "Comment not found" });
+      }
+      if (comment.is_deleted) {
+        return res.status(400).json({ error: "Cannot edit a deleted comment" });
+      }
+      if (comment.user_id !== currentUserId) {
+        return res
+          .status(403)
+          .json({ error: "Only the author can edit this comment" });
+      }
+
+      // Moderate the edited text.
+      const textMod = await moderation.checkText({
+        text: content,
+        surface: "comment_text",
+        userId: currentUserId,
+      });
+      if (!textMod.allowed) {
+        return res.status(422).json({
+          error: "Comment rejected",
+          code: "MODERATION_BLOCKED_TEXT",
+          details: "This comment violates our content policy.",
+        });
+      }
+
+      const { data: updated, error } = await supabase
+        .from("post_comments")
+        .update({ content, updated_at: new Date().toISOString() })
+        .eq("id", commentId)
+        .select(
+          "id, post_id, user_id, content, created_at, updated_at, is_deleted",
+        )
+        .single();
+
+      if (error) {
+        console.error("Error editing comment:", error);
+        return res
+          .status(500)
+          .json({ error: "Failed to edit comment", message: error.message });
+      }
+
+      // Flatten user fields to match the get_post_comments shape.
+      const { data: u } = await supabase
+        .from("users")
+        .select("first_name, last_name, avatar_url, belt, belt_verified")
+        .eq("id", updated.user_id)
+        .single();
+
+      const shaped = {
+        ...updated,
+        user_first_name: u?.first_name,
+        user_last_name: u?.last_name,
+        user_avatar_url: u?.avatar_url,
+        user_belt: u?.belt,
+        user_belt_verified: u?.belt_verified,
+      };
+
+      const [enriched] = await attachCommentLikes([shaped], currentUserId);
+      res.json(enriched);
+    } catch (error) {
+      console.error("Error in comment edit endpoint:", error);
+      res.status(500).json({ error: "Failed to edit comment" });
+    }
+  },
+);
+
+// Delete a comment (author or post owner)
+router.delete(
+  "/posts/:postId/comments/:commentId",
+  verifyToken,
+  async (req, res) => {
+    try {
+      const currentUserId = req.user.uid;
+      const { postId, commentId } = req.params;
+
+      const { data: comment, error: fetchError } = await supabase
+        .from("post_comments")
+        .select("id, user_id")
+        .eq("id", commentId)
+        .single();
+
+      if (fetchError || !comment) {
+        return res.status(404).json({ error: "Comment not found" });
+      }
+
+      let allowed = comment.user_id === currentUserId;
+      if (!allowed) {
+        const { data: post } = await supabase
+          .from("posts")
+          .select("user_id")
+          .eq("id", postId)
+          .single();
+        allowed = !!post && post.user_id === currentUserId;
+      }
+      if (!allowed) {
+        return res
+          .status(403)
+          .json({ error: "You can only delete your own comments" });
+      }
+
+      const { error } = await supabase
+        .from("post_comments")
+        .update({ is_deleted: true })
+        .eq("id", commentId);
+
+      if (error) {
+        console.error("Error deleting comment:", error);
+        return res
+          .status(500)
+          .json({ error: "Failed to delete comment", message: error.message });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error in comment delete endpoint:", error);
+      res.status(500).json({ error: "Failed to delete comment" });
+    }
+  },
+);
 
 // Update/Edit post
 router.put("/posts/:postId", verifyToken, async (req, res) => {

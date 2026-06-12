@@ -9,6 +9,7 @@ const {
   optimizeUserImages,
 } = require("../utils/imageOptimization");
 const { sendNotification } = require("../services/notification");
+const moderation = require("../services/moderation");
 
 // Get link preview for chat
 router.post("/chat/link-preview", verifyToken, async (req, res) => {
@@ -159,6 +160,36 @@ router.post(
         .delete()
         .eq("chat_id", chatData.id)
         .eq("user_id", req.user.uid);
+
+      // Content moderation before persisting message or uploading images.
+      if (message && message.trim()) {
+        const textMod = await moderation.checkText({
+          text: message,
+          surface: "chat_text",
+          userId: req.user.uid,
+        });
+        if (!textMod.allowed) {
+          return res.status(422).json({
+            error: "Message rejected",
+            code: "MODERATION_BLOCKED_TEXT",
+            details: "This message violates our content policy.",
+          });
+        }
+      }
+      if (imageFiles && imageFiles.length > 0) {
+        const imgMod = await moderation.checkImages({
+          buffers: imageFiles.map((f) => f.buffer),
+          surface: "chat_image",
+          userId: req.user.uid,
+        });
+        if (!imgMod.allowed) {
+          return res.status(422).json({
+            error: "Image rejected",
+            code: "MODERATION_BLOCKED",
+            details: "This image violates our content policy.",
+          });
+        }
+      }
 
       // Upload all images to storage
       let imageUrls = [];
@@ -681,6 +712,96 @@ router.delete("/chat-messages/:messageId", verifyToken, async (req, res) => {
   } catch (error) {
     console.error("Error in DELETE /chat-messages/:messageId:", error);
     res.status(500).json({ error: "Failed to delete message" });
+  }
+});
+
+// PATCH /chat-messages/:messageId — Edit a sent text message
+const MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+router.patch("/chat-messages/:messageId", verifyToken, async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const userId = req.user.uid;
+    const newText = (req.body.message || "").trim();
+
+    if (!newText) {
+      return res.status(400).json({ error: "message is required" });
+    }
+
+    const { data: message, error: fetchError } = await supabase
+      .from("chat_messages")
+      .select(
+        "id, sender_id, image_url, image_urls, deleted_for_everyone, created_at",
+      )
+      .eq("id", messageId)
+      .single();
+
+    if (fetchError || !message) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    // Only the original sender can edit.
+    if (message.sender_id !== userId) {
+      return res
+        .status(403)
+        .json({ error: "Only the sender can edit this message" });
+    }
+    if (message.deleted_for_everyone) {
+      return res.status(400).json({ error: "Cannot edit a deleted message" });
+    }
+    // Text-only: reject edits on image/attachment messages.
+    if (
+      message.image_url ||
+      (Array.isArray(message.image_urls) && message.image_urls.length > 0)
+    ) {
+      return res
+        .status(400)
+        .json({ error: "Only text messages can be edited" });
+    }
+    // Edit window.
+    const age = Date.now() - new Date(message.created_at).getTime();
+    if (age > MESSAGE_EDIT_WINDOW_MS) {
+      return res
+        .status(403)
+        .json({ error: "Edit window has expired (15 minutes)" });
+    }
+
+    // Moderate the new text before persisting.
+    const textMod = await moderation.checkText({
+      text: newText,
+      surface: "chat_text",
+      userId,
+    });
+    if (!textMod.allowed) {
+      return res.status(422).json({
+        error: "Message rejected",
+        code: "MODERATION_BLOCKED_TEXT",
+        details: "This message violates our content policy.",
+      });
+    }
+
+    const { data: updated, error } = await supabase
+      .from("chat_messages")
+      .update({
+        message: newText,
+        is_edited: true,
+        edited_at: new Date().toISOString(),
+        link_preview: await generateLinkPreview(newText),
+      })
+      .eq("id", messageId)
+      .select("id, message, is_edited, edited_at")
+      .single();
+
+    if (error) {
+      console.error("Error editing message:", error);
+      return res
+        .status(500)
+        .json({ error: "Failed to edit message", message: error.message });
+    }
+
+    res.json(updated);
+  } catch (error) {
+    console.error("Error in PATCH /chat-messages/:messageId:", error);
+    res.status(500).json({ error: "Failed to edit message" });
   }
 });
 
