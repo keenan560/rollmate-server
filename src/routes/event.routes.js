@@ -860,7 +860,27 @@ router.delete(
 // EVENT INVITATIONS
 // ==========================================
 
-// POST /events/:eventId/invite — Invite friends to an event (sends push notification)
+// GET /events/:eventId/invitations — Get list of invited user IDs for this event
+router.get("/events/:eventId/invitations", verifyToken, async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    const { data, error } = await supabase
+      .from("event_invitations")
+      .select("invited_user_id")
+      .eq("event_id", eventId);
+
+    if (error) throw error;
+
+    const invitedUserIds = (data || []).map((r) => r.invited_user_id);
+    res.json({ invited_user_ids: invitedUserIds });
+  } catch (error) {
+    console.error("Error in GET /events/:eventId/invitations:", error);
+    res.status(500).json({ error: "Failed to fetch invitations" });
+  }
+});
+
+// POST /events/:eventId/invite — Invite friends to an event (persists + sends push notification)
 router.post("/events/:eventId/invite", verifyToken, async (req, res) => {
   try {
     const userId = req.user.uid;
@@ -893,6 +913,16 @@ router.post("/events/:eventId/invite", verifyToken, async (req, res) => {
     if (!inviter) {
       return res.status(500).json({ error: "Failed to get user info" });
     }
+
+    // Persist invitations (ignore duplicates via onConflict)
+    const invitationRows = user_ids.map((uid) => ({
+      event_id: eventId,
+      invited_user_id: uid,
+      invited_by: userId,
+    }));
+    await supabase
+      .from("event_invitations")
+      .upsert(invitationRows, { onConflict: "event_id,invited_user_id" });
 
     // Send push notifications to invited users
     const notificationBody = `${event.title} — ${event.location_name}`;

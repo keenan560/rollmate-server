@@ -444,6 +444,131 @@ router.get("/training-logs/:id", verifyToken, async (req, res) => {
   }
 });
 
+// PUT /training-logs/:id — Update a training log (owner only)
+router.put("/training-logs/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Verify ownership
+    const { data: log, error: fetchError } = await supabase
+      .from("training_logs")
+      .select("id, user_id")
+      .eq("id", id)
+      .single();
+
+    if (fetchError || !log) {
+      return res.status(404).json({ error: "Training log not found" });
+    }
+
+    if (log.user_id !== req.user.uid) {
+      return res
+        .status(403)
+        .json({ error: "Not authorized to update this log" });
+    }
+
+    const {
+      date,
+      duration_minutes,
+      training_type,
+      intensity,
+      techniques_practiced,
+      sparring_rounds,
+      notes,
+      gym_name,
+      partner_id,
+    } = req.body;
+
+    const update = {};
+    if (date !== undefined) update.date = date;
+    if (duration_minutes !== undefined)
+      update.duration_minutes = duration_minutes;
+    if (training_type !== undefined) update.training_type = training_type;
+    if (intensity !== undefined) update.intensity = intensity;
+    if (techniques_practiced !== undefined)
+      update.techniques_practiced = techniques_practiced;
+    if (sparring_rounds !== undefined) update.sparring_rounds = sparring_rounds;
+    if (notes !== undefined) update.notes = notes;
+    if (gym_name !== undefined) update.gym_name = gym_name;
+    if (partner_id !== undefined) update.partner_id = partner_id || null;
+
+    const { data, error } = await supabase
+      .from("training_logs")
+      .update(update)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Resolve partner name if present
+    if (data.partner_id) {
+      const { data: partner } = await supabase
+        .from("users")
+        .select("first_name, last_name")
+        .eq("id", data.partner_id)
+        .single();
+      if (partner) {
+        data.partner_name = `${partner.first_name} ${partner.last_name}`;
+      }
+    }
+
+    // Recalculate streak (date may have changed)
+    try {
+      const { data: userLogs } = await supabase
+        .from("training_logs")
+        .select("date")
+        .eq("user_id", req.user.uid)
+        .order("date", { ascending: false });
+
+      const uniqueDays = [
+        ...new Set(
+          (userLogs || []).map(
+            (l) => new Date(l.date).toISOString().split("T")[0],
+          ),
+        ),
+      ].sort((a, b) => b.localeCompare(a));
+
+      let streak = 0;
+      if (uniqueDays.length > 0) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const mostRecent = new Date(uniqueDays[0] + "T00:00:00Z");
+        const diffFromToday = Math.floor(
+          (today.getTime() - mostRecent.getTime()) / 86400000,
+        );
+
+        if (diffFromToday <= 1) {
+          streak = 1;
+          for (let i = 1; i < uniqueDays.length; i++) {
+            const curr = new Date(uniqueDays[i] + "T00:00:00Z");
+            const prev = new Date(uniqueDays[i - 1] + "T00:00:00Z");
+            const d = Math.floor((prev.getTime() - curr.getTime()) / 86400000);
+            if (d === 1) {
+              streak++;
+            } else {
+              break;
+            }
+          }
+        }
+      }
+
+      await supabase
+        .from("users")
+        .update({ current_streak: streak })
+        .eq("id", req.user.uid);
+    } catch (streakErr) {
+      console.error("Error updating streak:", streakErr);
+    }
+
+    res.status(200).json(data);
+  } catch (error) {
+    console.error("Error updating training log:", error);
+    res
+      .status(500)
+      .json({ error: "Failed to update training log", details: error });
+  }
+});
+
 // DELETE /training-logs/:id — Delete a training log (owner only)
 router.delete("/training-logs/:id", verifyToken, async (req, res) => {
   try {
