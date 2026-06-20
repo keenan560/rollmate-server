@@ -17,6 +17,7 @@ router.post("/training-logs", verifyToken, async (req, res) => {
       notes,
       gym_name,
       partner_id,
+      video_study,
     } = req.body;
 
     if (!date || !duration_minutes || !training_type || !intensity) {
@@ -24,6 +25,30 @@ router.post("/training-logs", verifyToken, async (req, res) => {
         error:
           "date, duration_minutes, training_type, and intensity are required",
       });
+    }
+
+    // Validate video_study if provided
+    let validatedVideoStudy = null;
+    if (training_type === "video_study" && video_study) {
+      if (
+        video_study.comprehension !== undefined &&
+        video_study.comprehension !== null &&
+        (!Number.isInteger(video_study.comprehension) ||
+          video_study.comprehension < 1 ||
+          video_study.comprehension > 5)
+      ) {
+        return res.status(400).json({
+          error: "Comprehension must be between 1 and 5",
+        });
+      }
+      validatedVideoStudy = {
+        source: video_study.source || null,
+        title: video_study.title || null,
+        instructor: video_study.instructor || null,
+        url: video_study.url || null,
+        chapters_covered: video_study.chapters_covered || null,
+        comprehension: video_study.comprehension || null,
+      };
     }
 
     const { data, error } = await supabase
@@ -39,6 +64,7 @@ router.post("/training-logs", verifyToken, async (req, res) => {
         notes: notes || "",
         gym_name: gym_name || null,
         partner_id: partner_id || null,
+        video_study: validatedVideoStudy,
       })
       .select()
       .single();
@@ -140,6 +166,7 @@ router.post("/training-logs", verifyToken, async (req, res) => {
           both: "Gi & No-Gi",
           seminar: "Seminar",
           self_study: "Self Study",
+          video_study: "Video Study",
         };
 
         const formattedType =
@@ -452,7 +479,7 @@ router.put("/training-logs/:id", verifyToken, async (req, res) => {
     // Verify ownership
     const { data: log, error: fetchError } = await supabase
       .from("training_logs")
-      .select("id, user_id")
+      .select("id, user_id, training_type")
       .eq("id", id)
       .single();
 
@@ -476,6 +503,7 @@ router.put("/training-logs/:id", verifyToken, async (req, res) => {
       notes,
       gym_name,
       partner_id,
+      video_study,
     } = req.body;
 
     const update = {};
@@ -490,6 +518,38 @@ router.put("/training-logs/:id", verifyToken, async (req, res) => {
     if (notes !== undefined) update.notes = notes;
     if (gym_name !== undefined) update.gym_name = gym_name;
     if (partner_id !== undefined) update.partner_id = partner_id || null;
+
+    // Handle video_study
+    const effectiveType =
+      training_type !== undefined ? training_type : log.training_type;
+    if (video_study !== undefined) {
+      if (effectiveType === "video_study" && video_study) {
+        if (
+          video_study.comprehension !== undefined &&
+          video_study.comprehension !== null &&
+          (!Number.isInteger(video_study.comprehension) ||
+            video_study.comprehension < 1 ||
+            video_study.comprehension > 5)
+        ) {
+          return res.status(400).json({
+            error: "Comprehension must be between 1 and 5",
+          });
+        }
+        update.video_study = {
+          source: video_study.source || null,
+          title: video_study.title || null,
+          instructor: video_study.instructor || null,
+          url: video_study.url || null,
+          chapters_covered: video_study.chapters_covered || null,
+          comprehension: video_study.comprehension || null,
+        };
+      } else {
+        update.video_study = null;
+      }
+    } else if (training_type !== undefined && training_type !== "video_study") {
+      // If training_type changed away from video_study, clear it
+      update.video_study = null;
+    }
 
     const { data, error } = await supabase
       .from("training_logs")
