@@ -3,6 +3,301 @@ const router = express.Router();
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { sendNotification } = require("../services/notification");
+const { onSessionLogged } = require("../services/retentionCrons");
+
+// GET /training-logs/weekly-recap — Weekly recap for the current user
+router.get("/training-logs/weekly-recap", verifyToken, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const now = new Date();
+
+    // Calculate last completed week (Monday–Sunday)
+    const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon, ...
+    const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+
+    // Last Monday = start of current week, so previous week starts 7 days before that
+    const thisMonday = new Date(now);
+    thisMonday.setDate(now.getDate() - daysSinceMonday);
+    thisMonday.setHours(0, 0, 0, 0);
+
+    const lastMonday = new Date(thisMonday);
+    lastMonday.setDate(thisMonday.getDate() - 7);
+
+    const lastSunday = new Date(thisMonday);
+    lastSunday.setDate(thisMonday.getDate() - 1);
+
+    // Two weeks ago for comparison
+    const prevMonday = new Date(lastMonday);
+    prevMonday.setDate(lastMonday.getDate() - 7);
+
+    const weekStart = lastMonday.toISOString().split("T")[0];
+    const weekEnd = lastSunday.toISOString().split("T")[0];
+    const prevWeekStart = prevMonday.toISOString().split("T")[0];
+    const prevWeekEnd = new Date(lastMonday.getTime() - 86400000)
+      .toISOString()
+      .split("T")[0];
+
+    // Fetch this week's and previous week's logs
+    const [{ data: thisWeekLogs }, { data: prevWeekLogs }] = await Promise.all([
+      supabase
+        .from("training_logs")
+        .select(
+          "date, duration_minutes, sparring_rounds, techniques_practiced, intensity, training_type",
+        )
+        .eq("user_id", userId)
+        .gte("date", weekStart)
+        .lte("date", weekEnd)
+        .order("date", { ascending: true }),
+      supabase
+        .from("training_logs")
+        .select("date, duration_minutes, sparring_rounds")
+        .eq("user_id", userId)
+        .gte("date", prevWeekStart)
+        .lte("date", prevWeekEnd),
+    ]);
+
+    const sessions = thisWeekLogs || [];
+    const prevSessions = prevWeekLogs || [];
+
+    if (sessions.length === 0) {
+      return res.json({
+        week_start: weekStart,
+        week_end: weekEnd,
+        sessions_count: 0,
+        total_minutes: 0,
+        sparring_rounds: 0,
+        streak_days: 0,
+        top_technique: null,
+        favorite_day: null,
+        avg_intensity: null,
+        rank_change: 0,
+        current_rank: null,
+        percentile: null,
+        tier: "bronze",
+        tier_progress: 0,
+        comparison_message:
+          "No sessions last week. Time to get back on the mats!",
+        friends_who_trained: 0,
+        friend_who_trained_most: null,
+      });
+    }
+
+    // Basic stats
+    const sessions_count = sessions.length;
+    const total_minutes = sessions.reduce(
+      (sum, s) => sum + (s.duration_minutes || 0),
+      0,
+    );
+    const sparring_rounds = sessions.reduce(
+      (sum, s) => sum + (s.sparring_rounds || 0),
+      0,
+    );
+
+    // Streak days (consecutive days within the week)
+    const uniqueDays = [
+      ...new Set(sessions.map((s) => s.date.split("T")[0])),
+    ].sort();
+    let streak_days = 1;
+    let maxStreak = 1;
+    for (let i = 1; i < uniqueDays.length; i++) {
+      const prev = new Date(uniqueDays[i - 1]);
+      const curr = new Date(uniqueDays[i]);
+      const diff = (curr - prev) / 86400000;
+      if (diff === 1) {
+        streak_days++;
+        maxStreak = Math.max(maxStreak, streak_days);
+      } else {
+        streak_days = 1;
+      }
+    }
+    streak_days = uniqueDays.length === 1 ? 1 : maxStreak;
+
+    // Top technique
+    const techCount = {};
+    sessions.forEach((s) => {
+      (s.techniques_practiced || []).forEach((t) => {
+        techCount[t] = (techCount[t] || 0) + 1;
+      });
+    });
+    const top_technique =
+      Object.entries(techCount).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+    // Favorite day
+    const dayCount = {};
+    const dayNames = [
+      "Sunday",
+      "Monday",
+      "Tuesday",
+      "Wednesday",
+      "Thursday",
+      "Friday",
+      "Saturday",
+    ];
+    sessions.forEach((s) => {
+      const d = new Date(s.date).getDay();
+      dayCount[d] = (dayCount[d] || 0) + 1;
+    });
+    const favDayIndex = Object.entries(dayCount).sort(
+      (a, b) => b[1] - a[1],
+    )[0]?.[0];
+    const favorite_day = favDayIndex != null ? dayNames[favDayIndex] : null;
+
+    // Average intensity
+    const intensityMap = { light: 1, moderate: 2, hard: 3, competition: 4 };
+    const intensityLabels = ["light", "moderate", "hard", "competition"];
+    const intensities = sessions
+      .map((s) => intensityMap[s.intensity])
+      .filter(Boolean);
+    const avgIntVal =
+      intensities.length > 0
+        ? Math.round(
+            intensities.reduce((a, b) => a + b, 0) / intensities.length,
+          )
+        : null;
+    const avg_intensity =
+      avgIntVal != null ? intensityLabels[avgIntVal - 1] : null;
+
+    // Comparison message
+    const prevCount = prevSessions.length;
+    let comparison_message;
+    if (prevCount === 0) {
+      comparison_message = `${sessions_count} sessions — great start!`;
+    } else {
+      const diff = sessions_count - prevCount;
+      const pct = Math.round((Math.abs(diff) / prevCount) * 100);
+      if (diff > 0) {
+        comparison_message = `${diff} more session${diff > 1 ? "s" : ""} than last week — up ${pct}%!`;
+      } else if (diff < 0) {
+        comparison_message = `${Math.abs(diff)} fewer session${Math.abs(diff) > 1 ? "s" : ""} than last week — down ${pct}%`;
+      } else {
+        comparison_message = "Same as last week — consistency is key!";
+      }
+    }
+
+    // Rank and percentile (all users who trained that week)
+    const { data: allWeekLogs } = await supabase
+      .from("training_logs")
+      .select("user_id")
+      .gte("date", weekStart)
+      .lte("date", weekEnd);
+
+    const allUserCounts = {};
+    (allWeekLogs || []).forEach((l) => {
+      allUserCounts[l.user_id] = (allUserCounts[l.user_id] || 0) + 1;
+    });
+
+    const allSorted = Object.entries(allUserCounts).sort((a, b) => b[1] - a[1]);
+    const current_rank =
+      allSorted.findIndex(([id]) => id === userId) + 1 || null;
+    const totalActive = allSorted.length;
+
+    // Percentile: what % trained LESS than this user
+    const usersWithLess = allSorted.filter(
+      ([, count]) => count < sessions_count,
+    ).length;
+    const percentile =
+      totalActive > 1
+        ? Math.round((usersWithLess / (totalActive - 1)) * 100)
+        : 100;
+
+    // Rank change vs previous week
+    const { data: prevAllLogs } = await supabase
+      .from("training_logs")
+      .select("user_id")
+      .gte("date", prevWeekStart)
+      .lte("date", prevWeekEnd);
+
+    const prevAllCounts = {};
+    (prevAllLogs || []).forEach((l) => {
+      prevAllCounts[l.user_id] = (prevAllCounts[l.user_id] || 0) + 1;
+    });
+    const prevSorted = Object.entries(prevAllCounts).sort(
+      (a, b) => b[1] - a[1],
+    );
+    const prevRank = prevSorted.findIndex(([id]) => id === userId) + 1 || null;
+    const rank_change = prevRank && current_rank ? prevRank - current_rank : 0;
+
+    // Tier
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const { count: sessionsThisMonth } = await supabase
+      .from("training_logs")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .gte("date", startOfMonth.toISOString().split("T")[0]);
+
+    const tierThresholds = [
+      { name: "diamond", min: 20 },
+      { name: "platinum", min: 12 },
+      { name: "gold", min: 8 },
+      { name: "silver", min: 4 },
+      { name: "bronze", min: 0 },
+    ];
+    let tier = "bronze";
+    for (const t of tierThresholds) {
+      if ((sessionsThisMonth || 0) >= t.min) {
+        tier = t.name;
+        break;
+      }
+    }
+
+    // Friends who trained
+    const { getFriendIds: getFriendsUtil } = require("../utils/social");
+    const friendIds = await getFriendsUtil(userId);
+    let friends_who_trained = 0;
+    let friend_who_trained_most = null;
+
+    if (friendIds.length > 0) {
+      const friendTrainCounts = {};
+      (allWeekLogs || []).forEach((l) => {
+        if (friendIds.includes(l.user_id)) {
+          friendTrainCounts[l.user_id] =
+            (friendTrainCounts[l.user_id] || 0) + 1;
+        }
+      });
+
+      friends_who_trained = Object.keys(friendTrainCounts).length;
+
+      if (friends_who_trained > 0) {
+        const topFriendId = Object.entries(friendTrainCounts).sort(
+          (a, b) => b[1] - a[1],
+        )[0][0];
+
+        const { data: topFriend } = await supabase
+          .from("users")
+          .select("first_name, last_name")
+          .eq("id", topFriendId)
+          .single();
+
+        if (topFriend) {
+          friend_who_trained_most = `${topFriend.first_name} ${topFriend.last_name}`;
+        }
+      }
+    }
+
+    res.json({
+      week_start: weekStart,
+      week_end: weekEnd,
+      sessions_count,
+      total_minutes,
+      sparring_rounds,
+      streak_days,
+      top_technique,
+      favorite_day,
+      avg_intensity,
+      rank_change,
+      current_rank,
+      percentile,
+      tier,
+      tier_progress: sessionsThisMonth || 0,
+      comparison_message,
+      friends_who_trained,
+      friend_who_trained_most,
+    });
+  } catch (error) {
+    console.error("[training-logs] weekly-recap error:", error.message);
+    res.status(500).json({ error: "Failed to generate weekly recap" });
+  }
+});
 
 // POST /training-logs — Create a training log entry
 router.post("/training-logs", verifyToken, async (req, res) => {
@@ -131,6 +426,11 @@ router.post("/training-logs", verifyToken, async (req, res) => {
         data.partner_name = `${partner.first_name} ${partner.last_name}`;
       }
     }
+
+    // Fire-and-forget: retention system checks (tier, friend overtook, etc.)
+    onSessionLogged(req.user.uid).catch((err) =>
+      console.error("[retention] onSessionLogged error:", err.message),
+    );
 
     // Fire-and-forget: notify friends about the new session
     (async () => {

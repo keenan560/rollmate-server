@@ -11,6 +11,11 @@ const {
   purgeOldCompetitionPosts,
 } = require("./services/competitions");
 const { sendNotification } = require("./services/notification");
+const {
+  checkStreakAtRisk,
+  notifyWeeklyRecapReady,
+  checkRankDrops,
+} = require("./services/retentionCrons");
 const supabase = require("../config");
 
 const app = express();
@@ -180,6 +185,26 @@ cron.schedule("*/5 * * * *", async () => {
   } catch (err) {
     console.error("Error in training reminders cron:", err);
   }
+});
+
+// ─── Retention System Crons ───────────────────────────────────────────────────
+
+// Streak at risk — daily at 8pm UTC
+cron.schedule("0 20 * * *", async () => {
+  console.log("Running streak-at-risk check...");
+  await checkStreakAtRisk();
+});
+
+// Rank drop detection — daily at 7am UTC
+cron.schedule("0 7 * * *", async () => {
+  console.log("Running rank drop check...");
+  await checkRankDrops();
+});
+
+// Weekly recap ready — Mondays at 9am UTC
+cron.schedule("0 9 * * 1", async () => {
+  console.log("Running weekly recap notifications...");
+  await notifyWeeklyRecapReady();
 });
 
 module.exports = app;

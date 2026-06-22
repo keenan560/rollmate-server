@@ -22,6 +22,8 @@ const pushNotificationRoutes = require("./pushNotification.routes");
 const eventRoutes = require("./event.routes");
 const friendsRoutes = require("./friends.routes");
 const trainingReminderRoutes = require("./trainingReminder.routes");
+const leaderboardRoutes = require("./leaderboard.routes");
+const engagementRoutes = require("./engagement.routes");
 
 // Mount routes
 router.use("/", authRoutes);
@@ -45,5 +47,7 @@ router.use("/", pushNotificationRoutes);
 router.use("/", eventRoutes);
 router.use("/", friendsRoutes);
 router.use("/", trainingReminderRoutes);
+router.use("/", leaderboardRoutes);
+router.use("/", engagementRoutes);
 
 module.exports = router;
