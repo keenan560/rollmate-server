@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
+const { sendNotification } = require("../services/notification");
 
 // Helper: calculate IBJJF points for a round
 function calcPoints(round) {
@@ -172,6 +173,80 @@ router.post("/sparring-sessions", verifyToken, async (req, res) => {
       ...session,
       rounds: enrichedRounds,
     });
+
+    // Fire-and-forget: notify friends about the sparring session
+    (async () => {
+      try {
+        const { data: user } = await supabase
+          .from("users")
+          .select("first_name, last_name, avatar_url")
+          .eq("id", req.user.uid)
+          .single();
+
+        if (!user) return;
+
+        const { data: friends } = await supabase
+          .from("roll_requests")
+          .select("sender_id, receiver_id")
+          .eq("status", "accepted")
+          .or(`sender_id.eq.${req.user.uid},receiver_id.eq.${req.user.uid}`);
+
+        if (!friends || friends.length === 0) return;
+
+        const friendIds = friends.map((f) =>
+          f.sender_id === req.user.uid ? f.receiver_id : f.sender_id,
+        );
+
+        const roundCount = processedRounds.length;
+        const subText =
+          totalSubsByMe > 0
+            ? `, ${totalSubsByMe} sub${totalSubsByMe > 1 ? "s" : ""}`
+            : "";
+        const body = `${roundCount} round${roundCount > 1 ? "s" : ""} — ${totalPointsScored} pts scored${subText}`;
+
+        // Send push notifications
+        for (const friendId of friendIds) {
+          sendNotification(
+            friendId,
+            `${user.first_name} just sparred 🥊 — ${body}`,
+            {
+              title: `${user.first_name} just sparred 🥊`,
+              data: {
+                type: "sparring_session",
+                sparring_session_id: String(session.id),
+                user_id: req.user.uid,
+                user_name: `${user.first_name} ${user.last_name}`,
+              },
+            },
+          ).catch(() => {});
+        }
+
+        // Batch insert in-app notifications
+        const notifications = friendIds.map((friendId) => ({
+          user_id: friendId,
+          type: "sparring_session",
+          title: `${user.first_name} just sparred 🥊`,
+          body,
+          actor_id: req.user.uid,
+          actor_name: `${user.first_name} ${user.last_name}`,
+          actor_avatar: user.avatar_url || null,
+          reference_id: session.id,
+        }));
+
+        const { error: notifError } = await supabase
+          .from("notifications")
+          .insert(notifications);
+
+        if (notifError) {
+          console.error(
+            "[sparring] Error inserting friend notifications:",
+            notifError,
+          );
+        }
+      } catch (err) {
+        console.error("[sparring] Error sending notifications:", err.message);
+      }
+    })();
   } catch (error) {
     console.error("[sparring-sessions] create error:", error.message);
     res.status(500).json({ error: "Failed to create sparring session" });
