@@ -24,6 +24,7 @@ const friendsRoutes = require("./friends.routes");
 const trainingReminderRoutes = require("./trainingReminder.routes");
 const leaderboardRoutes = require("./leaderboard.routes");
 const engagementRoutes = require("./engagement.routes");
+const sparringRoutes = require("./sparring.routes");
 
 // Mount routes
 router.use("/", authRoutes);
@@ -49,5 +50,6 @@ router.use("/", friendsRoutes);
 router.use("/", trainingReminderRoutes);
 router.use("/", leaderboardRoutes);
 router.use("/", engagementRoutes);
+router.use("/", sparringRoutes);
 
 module.exports = router;

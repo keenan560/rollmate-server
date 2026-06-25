@@ -11,6 +11,7 @@ const VALID_CATEGORIES = [
   "sparring_rounds",
   "rounds",
   "streak",
+  "sparring_points",
 ];
 const VALID_PERIODS = ["weekly", "monthly", "all_time"];
 
@@ -39,6 +40,61 @@ function getPeriodStart(period) {
 // Aggregate training log data into leaderboard scores
 async function buildLeaderboard({ category, period, userIds = null }) {
   const periodStart = getPeriodStart(period);
+
+  // For sparring_points category, pull from sparring_sessions table
+  if (category === "sparring_points") {
+    let query = supabase
+      .from("sparring_sessions")
+      .select("user_id, total_points_scored, session_date");
+
+    if (periodStart) {
+      query = query.gte("session_date", periodStart);
+    }
+    if (userIds) {
+      query = query.in("user_id", userIds);
+    }
+
+    const { data: sessions, error } = await query;
+    if (error) throw error;
+
+    // Aggregate points by user
+    const userScores = {};
+    for (const s of sessions || []) {
+      userScores[s.user_id] =
+        (userScores[s.user_id] || 0) + (s.total_points_scored || 0);
+    }
+
+    const sorted = Object.entries(userScores)
+      .map(([uid, score]) => ({ user_id: uid, score }))
+      .filter((e) => e.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 100);
+
+    if (!sorted.length) return [];
+
+    const topIds = sorted.map((e) => e.user_id);
+    const { data: users, error: usersErr } = await supabase
+      .from("users")
+      .select("id, first_name, last_name, avatar_url, belt, is_private")
+      .in("id", topIds);
+    if (usersErr) throw usersErr;
+
+    const userMap = new Map((users || []).map((u) => [u.id, u]));
+
+    return sorted.map((entry, index) => {
+      const user = userMap.get(entry.user_id) || {};
+      return {
+        user_id: entry.user_id,
+        first_name: user.first_name || "Unknown",
+        last_name: user.last_name || "",
+        avatar_url: user.avatar_url || null,
+        belt: user.belt || null,
+        score: entry.score,
+        rank: index + 1,
+        is_private: user.is_private || false,
+      };
+    });
+  }
 
   // For streak category, pull directly from users table
   if (category === "streak") {
