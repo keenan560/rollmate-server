@@ -366,21 +366,34 @@ router.post("/training-logs", verifyToken, async (req, res) => {
 
     if (error) throw error;
 
-    // Recalculate and persist user's current streak
+    // Recalculate and persist user's current streak (includes sparring sessions)
     try {
-      const { data: userLogs } = await supabase
-        .from("training_logs")
-        .select("date")
-        .eq("user_id", req.user.uid)
-        .order("date", { ascending: false });
+      const [{ data: userLogs }, { data: sparringSessions }] =
+        await Promise.all([
+          supabase
+            .from("training_logs")
+            .select("date")
+            .eq("user_id", req.user.uid)
+            .order("date", { ascending: false }),
+          supabase
+            .from("sparring_sessions")
+            .select("session_date")
+            .eq("user_id", req.user.uid)
+            .order("session_date", { ascending: false }),
+        ]);
 
-      const uniqueDays = [
-        ...new Set(
-          (userLogs || []).map(
-            (l) => new Date(l.date).toISOString().split("T")[0],
-          ),
+      const allDates = [
+        ...(userLogs || []).map(
+          (l) => new Date(l.date).toISOString().split("T")[0],
         ),
-      ].sort((a, b) => b.localeCompare(a));
+        ...(sparringSessions || []).map(
+          (s) => new Date(s.session_date).toISOString().split("T")[0],
+        ),
+      ];
+
+      const uniqueDays = [...new Set(allDates)].sort((a, b) =>
+        b.localeCompare(a),
+      );
 
       let streak = 0;
       if (uniqueDays.length > 0) {
@@ -638,32 +651,93 @@ router.get("/training-logs/recent", verifyToken, async (req, res) => {
   }
 });
 
-// GET /training-logs — Fetch paginated training logs for the current user
+// GET /training-logs — Fetch paginated merged feed (training logs + sparring sessions)
 router.get("/training-logs", verifyToken, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
     const offset = (page - 1) * limit;
+    const userId = req.user.uid;
 
-    const { count, error: countError } = await supabase
-      .from("training_logs")
-      .select("*", { count: "exact", head: true })
-      .eq("user_id", req.user.uid);
+    // Fetch both tables in parallel
+    const [
+      { data: trainingLogs, error: tlError },
+      { data: sparringSessions, error: ssError },
+      { count: tlCount, error: tlCountError },
+      { count: ssCount, error: ssCountError },
+    ] = await Promise.all([
+      supabase
+        .from("training_logs")
+        .select("*")
+        .eq("user_id", userId)
+        .order("date", { ascending: false }),
+      supabase
+        .from("sparring_sessions")
+        .select("*")
+        .eq("user_id", userId)
+        .order("session_date", { ascending: false }),
+      supabase
+        .from("training_logs")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", userId),
+      supabase
+        .from("sparring_sessions")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", userId),
+    ]);
 
-    if (countError) throw countError;
+    if (tlError) throw tlError;
+    if (ssError) throw ssError;
+    if (tlCountError) throw tlCountError;
+    if (ssCountError) throw ssCountError;
 
-    const { data: logs, error } = await supabase
-      .from("training_logs")
-      .select("*")
-      .eq("user_id", req.user.uid)
-      .order("date", { ascending: false })
-      .range(offset, offset + limit - 1);
+    // Map training logs
+    const trainingMapped = (trainingLogs || []).map((t) => ({
+      ...t,
+      entry_type: "training",
+    }));
 
-    if (error) throw error;
+    // Map sparring sessions to unified shape
+    const sparringMapped = (sparringSessions || []).map((s) => ({
+      id: s.id,
+      entry_type: "sparring",
+      user_id: s.user_id,
+      date: s.session_date,
+      duration_minutes: 0,
+      training_type: s.training_type || "nogi",
+      intensity: "hard",
+      techniques_practiced: [],
+      sparring_rounds: s.total_rounds,
+      notes: s.notes || "",
+      partner_id: null,
+      partner_name: null,
+      gym_name: null,
+      rounds_count: s.total_rounds,
+      total_my_points: s.total_points_scored,
+      total_their_points: s.total_points_conceded,
+      total_submissions_by_me: s.total_submissions_by_me,
+      total_submissions_on_me: s.total_submissions_by_them,
+      created_at: s.created_at,
+      updated_at: s.updated_at,
+    }));
 
-    // Resolve partner names for logs that have a partner_id
+    // Merge and sort by date descending
+    const merged = [...trainingMapped, ...sparringMapped].sort(
+      (a, b) => new Date(b.date) - new Date(a.date),
+    );
+
+    const total = (tlCount || 0) + (ssCount || 0);
+
+    // Paginate
+    const paginated = merged.slice(offset, offset + limit);
+
+    // Resolve partner names for training logs in the page
     const partnerIds = [
-      ...new Set(logs.filter((l) => l.partner_id).map((l) => l.partner_id)),
+      ...new Set(
+        paginated
+          .filter((l) => l.entry_type === "training" && l.partner_id)
+          .map((l) => l.partner_id),
+      ),
     ];
     if (partnerIds.length > 0) {
       const { data: partners } = await supabase
@@ -676,7 +750,7 @@ router.get("/training-logs", verifyToken, async (req, res) => {
         partners.forEach((p) => {
           partnerMap[p.id] = `${p.first_name} ${p.last_name}`;
         });
-        logs.forEach((l) => {
+        paginated.forEach((l) => {
           if (l.partner_id && partnerMap[l.partner_id]) {
             l.partner_name = partnerMap[l.partner_id];
           }
@@ -684,7 +758,7 @@ router.get("/training-logs", verifyToken, async (req, res) => {
       }
     }
 
-    res.status(200).json({ logs, total: count, page, limit });
+    res.status(200).json({ logs: paginated, total, page, limit });
   } catch (error) {
     console.error("Error fetching training logs:", error);
     res
@@ -872,21 +946,34 @@ router.put("/training-logs/:id", verifyToken, async (req, res) => {
       }
     }
 
-    // Recalculate streak (date may have changed)
+    // Recalculate streak (date may have changed — includes sparring sessions)
     try {
-      const { data: userLogs } = await supabase
-        .from("training_logs")
-        .select("date")
-        .eq("user_id", req.user.uid)
-        .order("date", { ascending: false });
+      const [{ data: userLogs }, { data: sparringSessions }] =
+        await Promise.all([
+          supabase
+            .from("training_logs")
+            .select("date")
+            .eq("user_id", req.user.uid)
+            .order("date", { ascending: false }),
+          supabase
+            .from("sparring_sessions")
+            .select("session_date")
+            .eq("user_id", req.user.uid)
+            .order("session_date", { ascending: false }),
+        ]);
 
-      const uniqueDays = [
-        ...new Set(
-          (userLogs || []).map(
-            (l) => new Date(l.date).toISOString().split("T")[0],
-          ),
+      const allDates = [
+        ...(userLogs || []).map(
+          (l) => new Date(l.date).toISOString().split("T")[0],
         ),
-      ].sort((a, b) => b.localeCompare(a));
+        ...(sparringSessions || []).map(
+          (s) => new Date(s.session_date).toISOString().split("T")[0],
+        ),
+      ];
+
+      const uniqueDays = [...new Set(allDates)].sort((a, b) =>
+        b.localeCompare(a),
+      );
 
       let streak = 0;
       if (uniqueDays.length > 0) {
