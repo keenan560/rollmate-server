@@ -43,9 +43,12 @@ CREATE TABLE IF NOT EXISTS sparring_rounds (
   my_points INTEGER NOT NULL DEFAULT 0,
   their_points INTEGER NOT NULL DEFAULT 0,
 
-  -- Submission result
+  -- Submission result (legacy, derived from submissions array)
   result TEXT NOT NULL DEFAULT 'no_sub', -- 'no_sub', 'i_subbed', 'they_subbed'
-  submission_type TEXT, -- e.g. 'armbar', 'rear_naked_choke', 'triangle', etc.
+  submission_type TEXT, -- e.g. 'armbar', 'rear_naked_choke', 'triangle' (legacy single sub)
+
+  -- Submissions array (source of truth) — each entry: {"by": "me"|"them", "type": "armbar"}
+  submissions JSONB DEFAULT '[]'::jsonb,
 
   created_at TIMESTAMPTZ DEFAULT NOW(),
 

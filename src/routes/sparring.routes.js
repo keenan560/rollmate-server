@@ -24,6 +24,25 @@ function calcPoints(round) {
   return { my, their };
 }
 
+// Helper: derive result and counts from submissions array
+function deriveSubmissionData(round) {
+  const submissions = Array.isArray(round.submissions) ? round.submissions : [];
+
+  const mySubCount = submissions.filter((s) => s.by === "me").length;
+  const theirSubCount = submissions.filter((s) => s.by === "them").length;
+
+  // Derive legacy result field for backward compat
+  let result = "no_sub";
+  if (mySubCount > 0 && theirSubCount === 0) result = "i_subbed";
+  else if (theirSubCount > 0 && mySubCount === 0) result = "they_subbed";
+  else if (mySubCount > 0 && theirSubCount > 0) result = "i_subbed"; // mixed — user caught more
+
+  // Legacy submission_type — first sub in the list
+  const submissionType = submissions.length > 0 ? submissions[0].type : null;
+
+  return { submissions, result, submissionType, mySubCount, theirSubCount };
+}
+
 // POST /sparring-sessions — Create a new sparring session with rounds
 router.post("/sparring-sessions", verifyToken, async (req, res) => {
   try {
@@ -43,8 +62,31 @@ router.post("/sparring-sessions", verifyToken, async (req, res) => {
       const { my, their } = calcPoints(round);
       totalPointsScored += my;
       totalPointsConceded += their;
-      if (round.result === "i_subbed") totalSubsByMe++;
-      if (round.result === "they_subbed") totalSubsByThem++;
+
+      // Handle submissions array (new) or fall back to legacy result field
+      let subData;
+      if (Array.isArray(round.submissions) && round.submissions.length > 0) {
+        subData = deriveSubmissionData(round);
+      } else {
+        // Legacy: single result/submission_type
+        const legacyResult = round.result || "no_sub";
+        const legacySubs = [];
+        if (legacyResult === "i_subbed" && round.submission_type) {
+          legacySubs.push({ by: "me", type: round.submission_type });
+        } else if (legacyResult === "they_subbed" && round.submission_type) {
+          legacySubs.push({ by: "them", type: round.submission_type });
+        }
+        subData = {
+          submissions: legacySubs,
+          result: legacyResult,
+          submissionType: round.submission_type || null,
+          mySubCount: legacyResult === "i_subbed" ? 1 : 0,
+          theirSubCount: legacyResult === "they_subbed" ? 1 : 0,
+        };
+      }
+
+      totalSubsByMe += subData.mySubCount;
+      totalSubsByThem += subData.theirSubCount;
 
       return {
         round_number: index + 1,
@@ -63,8 +105,9 @@ router.post("/sparring-sessions", verifyToken, async (req, res) => {
         their_kobs: round.their_kobs || 0,
         my_points: my,
         their_points: their,
-        result: round.result || "no_sub",
-        submission_type: round.submission_type || null,
+        result: subData.result,
+        submission_type: subData.submissionType,
+        submissions: subData.submissions,
       };
     });
 
@@ -171,8 +214,30 @@ router.put("/sparring-sessions/:id", verifyToken, async (req, res) => {
       const { my, their } = calcPoints(round);
       totalPointsScored += my;
       totalPointsConceded += their;
-      if (round.result === "i_subbed") totalSubsByMe++;
-      if (round.result === "they_subbed") totalSubsByThem++;
+
+      // Handle submissions array (new) or fall back to legacy result field
+      let subData;
+      if (Array.isArray(round.submissions) && round.submissions.length > 0) {
+        subData = deriveSubmissionData(round);
+      } else {
+        const legacyResult = round.result || "no_sub";
+        const legacySubs = [];
+        if (legacyResult === "i_subbed" && round.submission_type) {
+          legacySubs.push({ by: "me", type: round.submission_type });
+        } else if (legacyResult === "they_subbed" && round.submission_type) {
+          legacySubs.push({ by: "them", type: round.submission_type });
+        }
+        subData = {
+          submissions: legacySubs,
+          result: legacyResult,
+          submissionType: round.submission_type || null,
+          mySubCount: legacyResult === "i_subbed" ? 1 : 0,
+          theirSubCount: legacyResult === "they_subbed" ? 1 : 0,
+        };
+      }
+
+      totalSubsByMe += subData.mySubCount;
+      totalSubsByThem += subData.theirSubCount;
 
       return {
         round_number: index + 1,
@@ -191,8 +256,9 @@ router.put("/sparring-sessions/:id", verifyToken, async (req, res) => {
         their_kobs: round.their_kobs || 0,
         my_points: my,
         their_points: their,
-        result: round.result || "no_sub",
-        submission_type: round.submission_type || null,
+        result: subData.result,
+        submission_type: subData.submissionType,
+        submissions: subData.submissions,
       };
     });
 
