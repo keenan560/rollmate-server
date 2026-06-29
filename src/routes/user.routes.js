@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const fs = require("fs");
 const supabase = require("../../config");
+const r2 = require("../services/r2Storage");
 const { verifyToken } = require("../middleware/auth");
 const { profilePicUpload } = require("../middleware/upload");
 const { optimizeUserImages } = require("../utils/imageOptimization");
@@ -635,9 +636,15 @@ router.post("/deleteUser", verifyToken, async (req, res, next) => {
 
     if (chatMessages) {
       for (const message of chatMessages) {
-        if (message.image_url && message.image_url.includes("/chat-images/")) {
-          const filePath = message.image_url.split("/chat-images/")[1];
-          mediaFilesToDelete.push({ bucket: "chat-images", path: filePath });
+        if (
+          message.image_url &&
+          message.image_url.includes("/chat-attachments/")
+        ) {
+          const filePath = message.image_url.split("/chat-attachments/")[1];
+          mediaFilesToDelete.push({
+            bucket: "chat-attachments",
+            path: filePath,
+          });
         }
       }
     }
@@ -890,22 +897,12 @@ router.post("/deleteUser", verifyToken, async (req, res, next) => {
 
     if (error) throw error;
 
-    // 9. Delete all media files from storage
+    // 9. Delete all media files from R2
     let deletedFilesCount = 0;
     for (const file of mediaFilesToDelete) {
       try {
-        const { error: storageError } = await supabase.storage
-          .from(file.bucket)
-          .remove([file.path]);
-
-        if (!storageError) {
-          deletedFilesCount++;
-        } else {
-          console.error(
-            `Failed to delete ${file.bucket}/${file.path}:`,
-            storageError.message,
-          );
-        }
+        await r2.deleteFile(file.bucket, file.path);
+        deletedFilesCount++;
       } catch (storageErr) {
         console.error(
           `Error deleting file ${file.bucket}/${file.path}:`,
@@ -993,33 +990,29 @@ router.post(
         .toString(36)
         .substring(7)}.${fileExtension}`;
 
-      const { data, error } = await supabase.storage
-        .from("profile-pics")
-        .upload(uniqueFileName, fileBuffer, {
-          contentType: req.file.mimetype,
-          upsert: false,
-        });
-
-      fs.unlinkSync(req.file.path);
-
-      if (error) {
-        console.error("Supabase storage error:", error);
+      let publicUrl;
+      try {
+        publicUrl = await r2.uploadFile(
+          "profile-pics",
+          uniqueFileName,
+          fileBuffer,
+          req.file.mimetype,
+        );
+      } catch (error) {
+        fs.unlinkSync(req.file.path);
+        console.error("R2 storage error:", error);
         return res.status(500).json({
           error: "Failed to upload to storage",
           details: error.message,
         });
       }
 
-      console.log("File uploaded successfully:", data);
-
-      const {
-        data: { publicUrl },
-      } = supabase.storage.from("profile-pics").getPublicUrl(uniqueFileName);
+      fs.unlinkSync(req.file.path);
+      console.log("File uploaded successfully:", uniqueFileName);
 
       res.json({
         message: "File uploaded successfully",
-        data: data,
-        publicUrl: publicUrl,
+        publicUrl,
       });
     } catch (error) {
       console.error("Error in profile-pics upload:", error);

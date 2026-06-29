@@ -43,7 +43,7 @@ const postImageUpload = multer({
 const postVideoUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB limit (Supabase free tier limit)
+    fileSize: 500 * 1024 * 1024, // 500MB limit
   },
   fileFilter: (req, file, cb) => {
     if (

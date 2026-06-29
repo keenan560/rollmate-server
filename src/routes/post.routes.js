@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const path = require("path");
 const supabase = require("../../config");
+const r2 = require("../services/r2Storage");
 const { verifyToken } = require("../middleware/auth");
 const { postImageUpload, postVideoUpload } = require("../middleware/upload");
 const { generateLinkPreview } = require("../utils/linkPreview");
@@ -365,28 +366,22 @@ router.post(
 
       const fileExt = path.extname(req.file.originalname);
       const fileName = `${currentUserId}_${Date.now()}${fileExt}`;
-      const filePath = `${fileName}`;
 
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from("post-images")
-        .upload(filePath, req.file.buffer, {
-          contentType: req.file.mimetype,
-          upsert: false,
-        });
-
-      if (uploadError) {
+      let imageUrl;
+      try {
+        imageUrl = await r2.uploadFile(
+          "post-images",
+          fileName,
+          req.file.buffer,
+          req.file.mimetype,
+        );
+      } catch (uploadError) {
         console.error("Error uploading image:", uploadError);
         return res.status(500).json({
           error: "Failed to upload image",
           message: uploadError.message,
         });
       }
-
-      const { data: urlData } = supabase.storage
-        .from("post-images")
-        .getPublicUrl(filePath);
-
-      const imageUrl = urlData.publicUrl;
 
       const { data, error } = await supabase
         .from("posts")
@@ -494,40 +489,34 @@ router.post(
         });
       }
 
-      // Upload all images to Supabase storage
+      // Upload all images to R2
       const imageUrls = [];
       for (const file of req.files) {
         // originalname can be null from React Native FormData
         const originalName = file.originalname || file.fieldname || "image.jpg";
         const fileExt = path.extname(originalName) || ".jpg";
         const fileName = `${currentUserId}_${Date.now()}_${Math.random().toString(36).substring(7)}${fileExt}`;
-        const filePath = `${fileName}`;
 
-        const { error: uploadError } = await supabase.storage
-          .from("post-images")
-          .upload(filePath, file.buffer, {
-            contentType: file.mimetype,
-            upsert: false,
-          });
-
-        if (uploadError) {
+        try {
+          const publicUrl = await r2.uploadFile(
+            "post-images",
+            fileName,
+            file.buffer,
+            file.mimetype,
+          );
+          imageUrls.push(publicUrl);
+        } catch (uploadError) {
           console.error("Error uploading image:", uploadError);
           // Clean up already uploaded images
           for (const url of imageUrls) {
-            const path = url.split("/post-images/")[1];
-            await supabase.storage.from("post-images").remove([path]);
+            const filePath = url.split("/post-images/")[1];
+            await r2.deleteFile("post-images", filePath).catch(() => {});
           }
           return res.status(500).json({
             error: "Failed to upload images",
             message: uploadError.message,
           });
         }
-
-        const { data: urlData } = supabase.storage
-          .from("post-images")
-          .getPublicUrl(filePath);
-
-        imageUrls.push(urlData.publicUrl);
       }
 
       // Create the post with first image as primary
@@ -548,8 +537,8 @@ router.post(
         console.error("Error creating post:", error);
         // Clean up uploaded images
         for (const url of imageUrls) {
-          const path = url.split("/post-images/")[1];
-          await supabase.storage.from("post-images").remove([path]);
+          const filePath = url.split("/post-images/")[1];
+          await r2.deleteFile("post-images", filePath).catch(() => {});
         }
         return res.status(500).json({
           error: "Failed to create post",
@@ -640,16 +629,16 @@ router.post(
       // Upload video
       const videoExt = path.extname(videoFile.originalname);
       const videoFileName = `${currentUserId}_${Date.now()}${videoExt}`;
-      const videoFilePath = `${videoFileName}`;
 
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from("post-videos")
-        .upload(videoFilePath, videoFile.buffer, {
-          contentType: videoFile.mimetype,
-          upsert: false,
-        });
-
-      if (uploadError) {
+      let videoUrl;
+      try {
+        videoUrl = await r2.uploadFile(
+          "post-videos",
+          videoFileName,
+          videoFile.buffer,
+          videoFile.mimetype,
+        );
+      } catch (uploadError) {
         console.error("Error uploading video:", uploadError);
         return res.status(500).json({
           error: "Failed to upload video",
@@ -657,38 +646,22 @@ router.post(
         });
       }
 
-      const { data: urlData } = supabase.storage
-        .from("post-videos")
-        .getPublicUrl(videoFilePath);
-
-      const videoUrl = urlData.publicUrl;
-
       // Upload thumbnail if provided
       let thumbnailUrl = null;
       if (thumbnailFile) {
         console.log("Uploading video thumbnail for user:", currentUserId);
-
         const thumbnailFileName = `thumb_${currentUserId}_${Date.now()}.jpg`;
-        const thumbnailFilePath = `${thumbnailFileName}`;
-
-        const { data: thumbUploadData, error: thumbUploadError } =
-          await supabase.storage
-            .from("video-thumbnails")
-            .upload(thumbnailFilePath, thumbnailFile.buffer, {
-              contentType: "image/jpeg",
-              upsert: false,
-            });
-
-        if (thumbUploadError) {
+        try {
+          thumbnailUrl = await r2.uploadFile(
+            "video-thumbnails",
+            thumbnailFileName,
+            thumbnailFile.buffer,
+            "image/jpeg",
+          );
+          console.log("Thumbnail uploaded successfully:", thumbnailUrl);
+        } catch (thumbUploadError) {
           console.error("Error uploading thumbnail:", thumbUploadError);
           // Continue without thumbnail - not critical
-        } else {
-          const { data: thumbUrlData } = supabase.storage
-            .from("video-thumbnails")
-            .getPublicUrl(thumbnailFilePath);
-
-          thumbnailUrl = thumbUrlData.publicUrl;
-          console.log("Thumbnail uploaded successfully:", thumbnailUrl);
         }
       }
 
@@ -739,7 +712,7 @@ router.post(
   },
 );
 
-// Generate signed upload URLs for direct-to-Supabase video upload
+// Generate presigned upload URLs for direct-to-R2 video upload
 router.post("/posts/video/signed-url", verifyToken, async (req, res) => {
   try {
     const userId = req.user.uid;
@@ -750,56 +723,59 @@ router.post("/posts/video/signed-url", verifyToken, async (req, res) => {
       `[Video Signed URL] User: ${userId}, ext: ${videoExtension}, contentType: ${videoContentType}, hasThumbnail: ${hasThumbnail}`,
     );
 
-    // Generate signed URL for video
+    // Generate presigned PUT URL for video
     const videoPath = `video_${userId}_${timestamp}.${videoExtension}`;
-    const { data: videoData, error: videoError } = await supabase.storage
-      .from("post-videos")
-      .createSignedUploadUrl(videoPath);
-
-    if (videoError) {
+    let videoUploadUrl;
+    try {
+      const result = await r2.createPresignedUploadUrl(
+        "post-videos",
+        videoPath,
+        videoContentType || "video/mp4",
+      );
+      videoUploadUrl = result.signedUrl;
+    } catch (videoError) {
       console.error(
-        `[Video Signed URL] Failed to create video signed URL:`,
+        `[Video Signed URL] Failed to create video presigned URL:`,
         videoError,
       );
       throw videoError;
     }
 
     console.log(
-      `[Video Signed URL] Video signed URL created for path: ${videoPath}`,
+      `[Video Signed URL] Video presigned URL created for path: ${videoPath}`,
     );
 
     let thumbnailUploadUrl = null;
-    let thumbnailToken = null;
     let thumbnailPath = null;
 
-    // Generate signed URL for thumbnail if needed
+    // Generate presigned PUT URL for thumbnail if needed
     if (hasThumbnail) {
       thumbnailPath = `thumb_${userId}_${timestamp}.jpg`;
-      const { data: thumbData, error: thumbError } = await supabase.storage
-        .from("video-thumbnails")
-        .createSignedUploadUrl(thumbnailPath);
-
-      if (thumbError) {
-        console.error(
-          `[Video Signed URL] Failed to create thumbnail signed URL:`,
-          thumbError,
+      try {
+        const result = await r2.createPresignedUploadUrl(
+          "video-thumbnails",
+          thumbnailPath,
+          "image/jpeg",
         );
-      } else {
-        thumbnailUploadUrl = thumbData.signedUrl;
-        thumbnailToken = thumbData.token;
+        thumbnailUploadUrl = result.signedUrl;
         console.log(
-          `[Video Signed URL] Thumbnail signed URL created for path: ${thumbnailPath}`,
+          `[Video Signed URL] Thumbnail presigned URL created for path: ${thumbnailPath}`,
+        );
+      } catch (thumbError) {
+        console.error(
+          `[Video Signed URL] Failed to create thumbnail presigned URL:`,
+          thumbError,
         );
       }
     }
 
-    console.log(`[Video Signed URL] Success - returning signed URLs to client`);
+    console.log(`[Video Signed URL] Success - returning presigned URLs to client`);
+    // Note: R2 presigned URLs are self-contained — no token needed.
+    // Client must PUT the file directly to videoUploadUrl with the correct Content-Type header.
     res.json({
-      videoUploadUrl: videoData.signedUrl,
-      videoToken: videoData.token,
+      videoUploadUrl,
       videoPath,
       thumbnailUploadUrl,
-      thumbnailToken,
       thumbnailPath,
     });
   } catch (error) {
@@ -822,7 +798,7 @@ router.post("/posts/video/complete", verifyToken, async (req, res) => {
     );
 
     // Moderate the caption. The video + thumbnail were uploaded directly to
-    // Supabase and are scanned asynchronously (phase 2 / Supabase webhook).
+    // R2 and are scanned asynchronously.
     const textMod = await moderation.checkText({
       text: content,
       surface: "post_text",
@@ -837,18 +813,12 @@ router.post("/posts/video/complete", verifyToken, async (req, res) => {
     }
 
     // Get public URLs
-    const { data: videoUrlData } = supabase.storage
-      .from("post-videos")
-      .getPublicUrl(videoPath);
-
-    console.log(`[Video Complete] Video public URL: ${videoUrlData.publicUrl}`);
+    const videoUrl = r2.getPublicUrl("post-videos", videoPath);
+    console.log(`[Video Complete] Video public URL: ${videoUrl}`);
 
     let thumbnailUrl = null;
     if (thumbnailPath) {
-      const { data: thumbUrlData } = supabase.storage
-        .from("video-thumbnails")
-        .getPublicUrl(thumbnailPath);
-      thumbnailUrl = thumbUrlData.publicUrl;
+      thumbnailUrl = r2.getPublicUrl("video-thumbnails", thumbnailPath);
       console.log(`[Video Complete] Thumbnail public URL: ${thumbnailUrl}`);
     }
 
@@ -859,7 +829,7 @@ router.post("/posts/video/complete", verifyToken, async (req, res) => {
         user_id: userId,
         content,
         media_type: "video",
-        media_url: videoUrlData.publicUrl,
+        media_url: videoUrl,
         video_thumbnail_url: thumbnailUrl,
         link_preview: await generateLinkPreview(content),
       })
@@ -1771,22 +1741,12 @@ router.delete("/posts/:postId", verifyToken, async (req, res) => {
       });
     }
 
-    // Delete media files from storage
+    // Delete media files from R2
     let deletedFilesCount = 0;
     for (const file of mediaFilesToDelete) {
       try {
-        const { error: storageError } = await supabase.storage
-          .from(file.bucket)
-          .remove([file.path]);
-
-        if (!storageError) {
-          deletedFilesCount++;
-        } else {
-          console.error(
-            `Failed to delete ${file.bucket}/${file.path}:`,
-            storageError.message,
-          );
-        }
+        await r2.deleteFile(file.bucket, file.path);
+        deletedFilesCount++;
       } catch (storageErr) {
         console.error(
           `Error deleting file ${file.bucket}/${file.path}:`,
