@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const supabase = require("../../config");
+const r2 = require("../services/r2Storage");
 const { verifyToken } = require("../middleware/auth");
 const { chatImageUpload } = require("../middleware/upload");
 const { generateLinkPreview } = require("../utils/linkPreview");
@@ -191,7 +192,7 @@ router.post(
         }
       }
 
-      // Upload all images to storage
+      // Upload all images to R2
       let imageUrls = [];
       if (imageFiles && imageFiles.length > 0) {
         for (const imageFile of imageFiles) {
@@ -199,31 +200,26 @@ router.post(
           const fileName = `${req.user.uid}-${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
           const filePath = `chat-images/${fileName}`;
 
-          const { error: uploadError } = await supabase.storage
-            .from("chat-attachments")
-            .upload(filePath, imageFile.buffer, {
-              contentType: imageFile.mimetype,
-              upsert: false,
-            });
-
-          if (uploadError) {
+          try {
+            const publicUrl = await r2.uploadFile(
+              "chat-attachments",
+              filePath,
+              imageFile.buffer,
+              imageFile.mimetype,
+            );
+            imageUrls.push(publicUrl);
+          } catch (uploadError) {
             console.error("Error uploading image:", uploadError);
             // Clean up already uploaded images
             for (const url of imageUrls) {
-              const path = url.split("/chat-attachments/")[1];
-              await supabase.storage.from("chat-attachments").remove([path]);
+              const p = url.split("/chat-attachments/")[1];
+              await r2.deleteFile("chat-attachments", p).catch(() => {});
             }
             return res.status(500).json({
               error: "Failed to upload image",
               message: uploadError.message,
             });
           }
-
-          const { data: urlData } = supabase.storage
-            .from("chat-attachments")
-            .getPublicUrl(filePath);
-
-          imageUrls.push(urlData.publicUrl);
         }
         console.log(`Uploaded ${imageUrls.length} images`);
       }

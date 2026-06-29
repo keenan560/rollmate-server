@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const path = require("path");
 const supabase = require("../../config");
+const r2 = require("../services/r2Storage");
 const { verifyToken } = require("../middleware/auth");
 const { postImageUpload } = require("../middleware/upload");
 const {
@@ -132,20 +133,19 @@ router.post(
       const fileExt = path.extname(req.file.originalname || ".jpg");
       const fileName = `event-cover-${req.user.uid}-${Date.now()}${fileExt}`;
 
-      const { error: uploadError } = await supabase.storage
-        .from("post-images")
-        .upload(fileName, req.file.buffer, {
-          contentType: req.file.mimetype,
-          upsert: false,
-        });
+      let publicUrl;
+      try {
+        publicUrl = await r2.uploadFile(
+          "post-images",
+          fileName,
+          req.file.buffer,
+          req.file.mimetype,
+        );
+      } catch (err) {
+        throw err;
+      }
 
-      if (uploadError) throw uploadError;
-
-      const { data: urlData } = supabase.storage
-        .from("post-images")
-        .getPublicUrl(fileName);
-
-      res.json({ publicUrl: urlData.publicUrl });
+      res.json({ publicUrl });
     } catch (error) {
       console.error("Error uploading event cover:", error);
       res.status(500).json({ error: "Failed to upload cover image" });
