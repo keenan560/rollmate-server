@@ -775,8 +775,10 @@ router.post("/posts/video/signed-url", verifyToken, async (req, res) => {
     res.json({
       videoUploadUrl,
       videoPath,
+      videoToken: videoPath, // backward compat for older app versions
       thumbnailUploadUrl,
       thumbnailPath,
+      thumbnailToken: thumbnailPath, // backward compat for older app versions
     });
   } catch (error) {
     console.error("[Video Signed URL] Error:", error);
