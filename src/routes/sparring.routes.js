@@ -25,6 +25,47 @@ function calcPoints(round) {
   return { my, their };
 }
 
+// Maps ScoringEvent.action <-> the flat my_*/their_* columns, in point order
+const ACTION_FIELD_MAP = [
+  { action: "takedown", myField: "my_takedowns", theirField: "their_takedowns" },
+  { action: "sweep", myField: "my_sweeps", theirField: "their_sweeps" },
+  { action: "guard_pass", myField: "my_passes", theirField: "their_passes" },
+  { action: "mount", myField: "my_mounts", theirField: "their_mounts" },
+  { action: "back_take", myField: "my_backs", theirField: "their_backs" },
+  { action: "knee_on_belly", myField: "my_kobs", theirField: "their_kobs" },
+];
+
+// Helper: expand flat my_*/their_* count columns into ScoringEvent[] (count > 0 only)
+function toScoringEvents(round, side) {
+  const field = side === "my" ? "myField" : "theirField";
+  return ACTION_FIELD_MAP.filter((m) => (round[m[field]] || 0) > 0).map((m) => ({
+    action: m.action,
+    count: round[m[field]],
+  }));
+}
+
+// Helper: shape a raw sparring_rounds row into the frontend's SparringRound contract,
+// keeping the original flat columns for backward compat
+function formatRound(round, opponentMap) {
+  const opponent = round.opponent_id
+    ? opponentMap[round.opponent_id] || null
+    : null;
+  // Fall back to the free-text name when the opponent isn't a Roll Mate user
+  const resolvedName = opponent ? opponent.name : round.guest_opponent_name || null;
+  return {
+    ...round,
+    opponent_name: resolvedName,
+    partner_id: round.opponent_id || null,
+    partner_name: resolvedName,
+    partner_avatar_url: opponent ? opponent.avatar_url : null,
+    opponent_avatar_url: opponent ? opponent.avatar_url : null,
+    opponent_belt: opponent ? opponent.belt : null,
+    my_scores: toScoringEvents(round, "my"),
+    their_scores: toScoringEvents(round, "their"),
+    submissions: Array.isArray(round.submissions) ? round.submissions : [],
+  };
+}
+
 // Helper: derive result and counts from submissions array
 function deriveSubmissionData(round) {
   const submissions = Array.isArray(round.submissions) ? round.submissions : [];
@@ -42,6 +83,61 @@ function deriveSubmissionData(round) {
   const submissionType = submissions.length > 0 ? submissions[0].type : null;
 
   return { submissions, result, submissionType, mySubCount, theirSubCount };
+}
+
+// Flag rounds logged against a known Rollmate opponent as pending cross-credit,
+// and notify that opponent so they can adopt it into their own log.
+async function notifyOpponentsOfCredit(loggerId, loggerUser, savedRounds) {
+  const creditable = (savedRounds || []).filter(
+    (r) => r.opponent_id && r.opponent_id !== loggerId,
+  );
+  if (creditable.length === 0 || !loggerUser) return;
+
+  const ids = creditable.map((r) => r.id);
+  const { error: statusError } = await supabase
+    .from("sparring_rounds")
+    .update({ credit_status: "pending" })
+    .in("id", ids);
+
+  if (statusError) {
+    console.error("[sparring] Error flagging pending credit:", statusError);
+    return;
+  }
+
+  const loggerName = `${loggerUser.first_name} ${loggerUser.last_name}`;
+
+  const notifications = creditable.map((r) => {
+    const subs = Array.isArray(r.submissions) ? r.submissions : [];
+    const gotSubbed = subs.some((s) => s.by === "me");
+    const subLine = gotSubbed
+      ? ` — caught with a ${(r.submission_type || "submission").replace(/_/g, " ")}`
+      : "";
+    return {
+      user_id: r.opponent_id,
+      type: "sparring_round_credit",
+      title: `${loggerName} logged a round with you`,
+      body: `${r.my_points}-${r.their_points}${subLine}. Tap to add it to your log.`,
+      actor_id: loggerId,
+      actor_name: loggerName,
+      actor_avatar: loggerUser.avatar_url || null,
+      reference_id: r.id,
+    };
+  });
+
+  const { error: notifError } = await supabase
+    .from("notifications")
+    .insert(notifications);
+
+  if (notifError) {
+    console.error("[sparring] Error inserting credit notifications:", notifError);
+  }
+
+  for (const r of creditable) {
+    sendNotification(r.opponent_id, `${loggerName} logged a round with you`, {
+      title: `${loggerName} logged a round with you`,
+      data: { type: "sparring_round_credit", round_id: String(r.id) },
+    }).catch(() => {});
+  }
 }
 
 // POST /sparring-sessions — Create a new sparring session with rounds
@@ -92,6 +188,7 @@ router.post("/sparring-sessions", verifyToken, async (req, res) => {
       return {
         round_number: index + 1,
         opponent_id: round.opponent_id || null,
+        guest_opponent_name: round.opponent_id ? null : (round.opponent_name || null),
         my_takedowns: round.my_takedowns || 0,
         my_sweeps: round.my_sweeps || 0,
         my_passes: round.my_passes || 0,
@@ -157,17 +254,18 @@ router.post("/sparring-sessions", verifyToken, async (req, res) => {
     if (opponentIds.length > 0) {
       const { data: opponents } = await supabase
         .from("users")
-        .select("id, first_name, last_name")
+        .select("id, first_name, last_name, avatar_url, belt")
         .in("id", opponentIds);
       (opponents || []).forEach((o) => {
-        opponentMap[o.id] = `${o.first_name} ${o.last_name}`;
+        opponentMap[o.id] = {
+          name: `${o.first_name} ${o.last_name}`,
+          avatar_url: o.avatar_url || null,
+          belt: o.belt || null,
+        };
       });
     }
 
-    const enrichedRounds = (savedRounds || []).map((r) => ({
-      ...r,
-      opponent_name: r.opponent_id ? opponentMap[r.opponent_id] || null : null,
-    }));
+    const enrichedRounds = (savedRounds || []).map((r) => formatRound(r, opponentMap));
 
     res.status(201).json({
       ...session,
@@ -184,6 +282,11 @@ router.post("/sparring-sessions", verifyToken, async (req, res) => {
           .single();
 
         if (!user) return;
+
+        // Notify any known Rollmate opponents so they can adopt these rounds
+        notifyOpponentsOfCredit(req.user.uid, user, savedRounds).catch((err) =>
+          console.error("[sparring] credit notify error:", err.message),
+        );
 
         const { data: friends } = await supabase
           .from("roll_requests")
@@ -317,6 +420,7 @@ router.put("/sparring-sessions/:id", verifyToken, async (req, res) => {
       return {
         round_number: index + 1,
         opponent_id: round.opponent_id || null,
+        guest_opponent_name: round.opponent_id ? null : (round.opponent_name || null),
         my_takedowns: round.my_takedowns || 0,
         my_sweeps: round.my_sweeps || 0,
         my_passes: round.my_passes || 0,
@@ -389,22 +493,38 @@ router.put("/sparring-sessions/:id", verifyToken, async (req, res) => {
     if (opponentIds.length > 0) {
       const { data: opponents } = await supabase
         .from("users")
-        .select("id, first_name, last_name")
+        .select("id, first_name, last_name, avatar_url, belt")
         .in("id", opponentIds);
       (opponents || []).forEach((o) => {
-        opponentMap[o.id] = `${o.first_name} ${o.last_name}`;
+        opponentMap[o.id] = {
+          name: `${o.first_name} ${o.last_name}`,
+          avatar_url: o.avatar_url || null,
+          belt: o.belt || null,
+        };
       });
     }
 
-    const enrichedRounds = (savedRounds || []).map((r) => ({
-      ...r,
-      opponent_name: r.opponent_id ? opponentMap[r.opponent_id] || null : null,
-    }));
+    const enrichedRounds = (savedRounds || []).map((r) => formatRound(r, opponentMap));
 
     res.status(200).json({
       ...session,
       rounds: enrichedRounds,
     });
+
+    // Fire-and-forget: notify any known Rollmate opponents about the edited rounds
+    (async () => {
+      try {
+        const { data: user } = await supabase
+          .from("users")
+          .select("first_name, last_name, avatar_url")
+          .eq("id", req.user.uid)
+          .single();
+        if (!user) return;
+        await notifyOpponentsOfCredit(req.user.uid, user, savedRounds);
+      } catch (err) {
+        console.error("[sparring] credit notify error:", err.message);
+      }
+    })();
   } catch (error) {
     console.error("[sparring-sessions] update error:", error.message);
     res.status(500).json({ error: "Failed to update sparring session" });
@@ -475,7 +595,52 @@ router.get("/sparring-sessions", verifyToken, async (req, res) => {
 
     if (error) throw error;
 
-    res.json({ sessions: sessions || [], total: count, page, limit });
+    const sessionIds = (sessions || []).map((s) => s.id);
+
+    let roundsBySession = {};
+    if (sessionIds.length > 0) {
+      const { data: rounds, error: roundsError } = await supabase
+        .from("sparring_rounds")
+        .select("*")
+        .in("session_id", sessionIds)
+        .order("round_number", { ascending: true });
+
+      if (roundsError) throw roundsError;
+
+      const opponentIds = [
+        ...new Set(
+          (rounds || []).filter((r) => r.opponent_id).map((r) => r.opponent_id),
+        ),
+      ];
+
+      let opponentMap = {};
+      if (opponentIds.length > 0) {
+        const { data: opponents } = await supabase
+          .from("users")
+          .select("id, first_name, last_name, avatar_url, belt")
+          .in("id", opponentIds);
+        (opponents || []).forEach((o) => {
+          opponentMap[o.id] = {
+            name: `${o.first_name} ${o.last_name}`,
+            avatar_url: o.avatar_url || null,
+            belt: o.belt || null,
+          };
+        });
+      }
+
+      (rounds || []).forEach((r) => {
+        const formatted = formatRound(r, opponentMap);
+        if (!roundsBySession[r.session_id]) roundsBySession[r.session_id] = [];
+        roundsBySession[r.session_id].push(formatted);
+      });
+    }
+
+    const enrichedSessions = (sessions || []).map((s) => ({
+      ...s,
+      rounds: roundsBySession[s.id] || [],
+    }));
+
+    res.json({ sessions: enrichedSessions, total: count, page, limit });
   } catch (error) {
     console.error("[sparring-sessions] list error:", error.message);
     res.status(500).json({ error: "Failed to fetch sparring sessions" });
@@ -523,17 +688,18 @@ router.get("/sparring-sessions/:id", verifyToken, async (req, res) => {
     if (opponentIds.length > 0) {
       const { data: opponents } = await supabase
         .from("users")
-        .select("id, first_name, last_name")
+        .select("id, first_name, last_name, avatar_url, belt")
         .in("id", opponentIds);
       (opponents || []).forEach((o) => {
-        opponentMap[o.id] = `${o.first_name} ${o.last_name}`;
+        opponentMap[o.id] = {
+          name: `${o.first_name} ${o.last_name}`,
+          avatar_url: o.avatar_url || null,
+          belt: o.belt || null,
+        };
       });
     }
 
-    const enrichedRounds = (rounds || []).map((r) => ({
-      ...r,
-      opponent_name: r.opponent_id ? opponentMap[r.opponent_id] || null : null,
-    }));
+    const enrichedRounds = (rounds || []).map((r) => formatRound(r, opponentMap));
 
     res.json({ ...session, rounds: enrichedRounds });
   } catch (error) {
@@ -576,6 +742,265 @@ router.delete("/sparring-sessions/:id", verifyToken, async (req, res) => {
   } catch (error) {
     console.error("[sparring-sessions] delete error:", error.message);
     res.status(500).json({ error: "Failed to delete sparring session" });
+  }
+});
+
+// GET /sparring-rounds/:roundId — Detail for the cross-credit review screen
+router.get("/sparring-rounds/:roundId", verifyToken, async (req, res) => {
+  try {
+    const { roundId } = req.params;
+    const userId = req.user.uid;
+
+    const { data: round, error } = await supabase
+      .from("sparring_rounds")
+      .select("*")
+      .eq("id", roundId)
+      .single();
+
+    if (error || !round) {
+      return res.status(404).json({ error: "Round not found" });
+    }
+
+    const { data: session, error: sessionError } = await supabase
+      .from("sparring_sessions")
+      .select("id, user_id, session_date")
+      .eq("id", round.session_id)
+      .single();
+
+    if (sessionError || !session) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    if (round.opponent_id !== userId && session.user_id !== userId) {
+      return res.status(403).json({ error: "Not authorized to view this round" });
+    }
+
+    const { data: logger } = await supabase
+      .from("users")
+      .select("id, first_name, last_name, avatar_url, belt")
+      .eq("id", session.user_id)
+      .single();
+
+    res.json({
+      ...round,
+      session_date: session.session_date,
+      my_scores: toScoringEvents(round, "my"),
+      their_scores: toScoringEvents(round, "their"),
+      submissions: Array.isArray(round.submissions) ? round.submissions : [],
+      logger: logger
+        ? {
+            id: logger.id,
+            name: `${logger.first_name} ${logger.last_name}`,
+            avatar_url: logger.avatar_url || null,
+            belt: logger.belt || null,
+          }
+        : null,
+    });
+  } catch (error) {
+    console.error("[sparring-rounds] detail error:", error.message);
+    res.status(500).json({ error: "Failed to fetch round" });
+  }
+});
+
+// POST /sparring-rounds/:roundId/adopt — Mirror a logged round into your own log
+router.post("/sparring-rounds/:roundId/adopt", verifyToken, async (req, res) => {
+  try {
+    const { roundId } = req.params;
+    const userId = req.user.uid;
+
+    const { data: round, error } = await supabase
+      .from("sparring_rounds")
+      .select("*")
+      .eq("id", roundId)
+      .single();
+
+    if (error || !round) {
+      return res.status(404).json({ error: "Round not found" });
+    }
+    if (round.opponent_id !== userId) {
+      return res.status(403).json({ error: "Not authorized to adopt this round" });
+    }
+    if (round.credit_status !== "pending") {
+      return res
+        .status(400)
+        .json({ error: `Round is already ${round.credit_status}` });
+    }
+
+    const { data: originalSession, error: sessionError } = await supabase
+      .from("sparring_sessions")
+      .select("id, user_id, session_date")
+      .eq("id", round.session_id)
+      .single();
+
+    if (sessionError || !originalSession) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    // Find or create the adopter's own session for that date
+    let { data: mySession, error: mySessionError } = await supabase
+      .from("sparring_sessions")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("session_date", originalSession.session_date)
+      .maybeSingle();
+
+    if (mySessionError) throw mySessionError;
+
+    if (!mySession) {
+      const { data: created, error: createError } = await supabase
+        .from("sparring_sessions")
+        .insert({
+          user_id: userId,
+          session_date: originalSession.session_date,
+          total_rounds: 0,
+          total_points_scored: 0,
+          total_points_conceded: 0,
+          total_submissions_by_me: 0,
+          total_submissions_by_them: 0,
+        })
+        .select()
+        .single();
+      if (createError) throw createError;
+      mySession = created;
+    }
+
+    const { data: lastRound } = await supabase
+      .from("sparring_rounds")
+      .select("round_number")
+      .eq("session_id", mySession.id)
+      .order("round_number", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const nextRoundNumber = (lastRound?.round_number || 0) + 1;
+
+    // Mirror the round from the adopter's perspective (my/their swapped, subs flipped)
+    const flippedSubmissions = (
+      Array.isArray(round.submissions) ? round.submissions : []
+    ).map((s) => ({ by: s.by === "me" ? "them" : "me", type: s.type }));
+    const subData = deriveSubmissionData({ submissions: flippedSubmissions });
+
+    const mirroredRound = {
+      session_id: mySession.id,
+      round_number: nextRoundNumber,
+      opponent_id: originalSession.user_id,
+      guest_opponent_name: null,
+      my_takedowns: round.their_takedowns,
+      my_sweeps: round.their_sweeps,
+      my_passes: round.their_passes,
+      my_mounts: round.their_mounts,
+      my_backs: round.their_backs,
+      my_kobs: round.their_kobs,
+      their_takedowns: round.my_takedowns,
+      their_sweeps: round.my_sweeps,
+      their_passes: round.my_passes,
+      their_mounts: round.my_mounts,
+      their_backs: round.my_backs,
+      their_kobs: round.my_kobs,
+      my_points: round.their_points,
+      their_points: round.my_points,
+      result: subData.result,
+      submission_type: subData.submissionType,
+      submissions: subData.submissions,
+      credit_status: "none",
+      adopted_from_round_id: round.id,
+    };
+
+    const { data: insertedRound, error: insertError } = await supabase
+      .from("sparring_rounds")
+      .insert(mirroredRound)
+      .select()
+      .single();
+    if (insertError) throw insertError;
+
+    // Recompute the adopter's session totals from all of its rounds
+    const { data: allMyRounds, error: allRoundsError } = await supabase
+      .from("sparring_rounds")
+      .select("my_points, their_points, submissions")
+      .eq("session_id", mySession.id);
+    if (allRoundsError) throw allRoundsError;
+
+    let totalPointsScored = 0;
+    let totalPointsConceded = 0;
+    let totalSubsByMe = 0;
+    let totalSubsByThem = 0;
+    (allMyRounds || []).forEach((r) => {
+      totalPointsScored += r.my_points || 0;
+      totalPointsConceded += r.their_points || 0;
+      const subs = Array.isArray(r.submissions) ? r.submissions : [];
+      totalSubsByMe += subs.filter((s) => s.by === "me").length;
+      totalSubsByThem += subs.filter((s) => s.by === "them").length;
+    });
+
+    await supabase
+      .from("sparring_sessions")
+      .update({
+        total_rounds: (allMyRounds || []).length,
+        total_points_scored: totalPointsScored,
+        total_points_conceded: totalPointsConceded,
+        total_submissions_by_me: totalSubsByMe,
+        total_submissions_by_them: totalSubsByThem,
+      })
+      .eq("id", mySession.id);
+
+    await supabase
+      .from("sparring_rounds")
+      .update({ credit_status: "adopted" })
+      .eq("id", round.id);
+
+    await supabase
+      .from("notifications")
+      .update({ is_read: true })
+      .eq("user_id", userId)
+      .eq("type", "sparring_round_credit")
+      .eq("reference_id", round.id);
+
+    res.json({ session_id: mySession.id, round: insertedRound });
+  } catch (error) {
+    console.error("[sparring-rounds] adopt error:", error.message);
+    res.status(500).json({ error: "Failed to adopt round" });
+  }
+});
+
+// POST /sparring-rounds/:roundId/dismiss — Decline a pending cross-credit round
+router.post("/sparring-rounds/:roundId/dismiss", verifyToken, async (req, res) => {
+  try {
+    const { roundId } = req.params;
+    const userId = req.user.uid;
+
+    const { data: round, error } = await supabase
+      .from("sparring_rounds")
+      .select("id, opponent_id, credit_status")
+      .eq("id", roundId)
+      .single();
+
+    if (error || !round) {
+      return res.status(404).json({ error: "Round not found" });
+    }
+    if (round.opponent_id !== userId) {
+      return res.status(403).json({ error: "Not authorized to dismiss this round" });
+    }
+    if (round.credit_status !== "pending") {
+      return res
+        .status(400)
+        .json({ error: `Round is already ${round.credit_status}` });
+    }
+
+    await supabase
+      .from("sparring_rounds")
+      .update({ credit_status: "dismissed" })
+      .eq("id", roundId);
+
+    await supabase
+      .from("notifications")
+      .update({ is_read: true })
+      .eq("user_id", userId)
+      .eq("type", "sparring_round_credit")
+      .eq("reference_id", roundId);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("[sparring-rounds] dismiss error:", error.message);
+    res.status(500).json({ error: "Failed to dismiss round" });
   }
 });
 

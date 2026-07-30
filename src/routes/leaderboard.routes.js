@@ -12,6 +12,7 @@ const VALID_CATEGORIES = [
   "rounds",
   "streak",
   "sparring_points",
+  "sparring_subs",
 ];
 const VALID_PERIODS = ["weekly", "monthly", "all_time"];
 
@@ -37,63 +38,77 @@ function getPeriodStart(period) {
   return null; // all_time — no date filter
 }
 
+// Sum a numeric column on sparring_sessions per user and rank them
+async function buildSparringAggregateLeaderboard(field, periodStart, userIds) {
+  let query = supabase
+    .from("sparring_sessions")
+    .select(`user_id, ${field}, session_date`);
+
+  if (periodStart) {
+    query = query.gte("session_date", periodStart);
+  }
+  if (userIds) {
+    query = query.in("user_id", userIds);
+  }
+
+  const { data: sessions, error } = await query;
+  if (error) throw error;
+
+  const userScores = {};
+  for (const s of sessions || []) {
+    userScores[s.user_id] = (userScores[s.user_id] || 0) + (s[field] || 0);
+  }
+
+  const sorted = Object.entries(userScores)
+    .map(([uid, score]) => ({ user_id: uid, score }))
+    .filter((e) => e.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 100);
+
+  if (!sorted.length) return [];
+
+  const topIds = sorted.map((e) => e.user_id);
+  const { data: users, error: usersErr } = await supabase
+    .from("users")
+    .select("id, first_name, last_name, avatar_url, belt, is_private")
+    .in("id", topIds);
+  if (usersErr) throw usersErr;
+
+  const userMap = new Map((users || []).map((u) => [u.id, u]));
+
+  return sorted.map((entry, index) => {
+    const user = userMap.get(entry.user_id) || {};
+    return {
+      user_id: entry.user_id,
+      first_name: user.first_name || "Unknown",
+      last_name: user.last_name || "",
+      avatar_url: user.avatar_url || null,
+      belt: user.belt || null,
+      score: entry.score,
+      rank: index + 1,
+      is_private: user.is_private || false,
+    };
+  });
+}
+
 // Aggregate training log data into leaderboard scores
 async function buildLeaderboard({ category, period, userIds = null }) {
   const periodStart = getPeriodStart(period);
 
-  // For sparring_points category, pull from sparring_sessions table
   if (category === "sparring_points") {
-    let query = supabase
-      .from("sparring_sessions")
-      .select("user_id, total_points_scored, session_date");
+    return buildSparringAggregateLeaderboard(
+      "total_points_scored",
+      periodStart,
+      userIds,
+    );
+  }
 
-    if (periodStart) {
-      query = query.gte("session_date", periodStart);
-    }
-    if (userIds) {
-      query = query.in("user_id", userIds);
-    }
-
-    const { data: sessions, error } = await query;
-    if (error) throw error;
-
-    // Aggregate points by user
-    const userScores = {};
-    for (const s of sessions || []) {
-      userScores[s.user_id] =
-        (userScores[s.user_id] || 0) + (s.total_points_scored || 0);
-    }
-
-    const sorted = Object.entries(userScores)
-      .map(([uid, score]) => ({ user_id: uid, score }))
-      .filter((e) => e.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 100);
-
-    if (!sorted.length) return [];
-
-    const topIds = sorted.map((e) => e.user_id);
-    const { data: users, error: usersErr } = await supabase
-      .from("users")
-      .select("id, first_name, last_name, avatar_url, belt, is_private")
-      .in("id", topIds);
-    if (usersErr) throw usersErr;
-
-    const userMap = new Map((users || []).map((u) => [u.id, u]));
-
-    return sorted.map((entry, index) => {
-      const user = userMap.get(entry.user_id) || {};
-      return {
-        user_id: entry.user_id,
-        first_name: user.first_name || "Unknown",
-        last_name: user.last_name || "",
-        avatar_url: user.avatar_url || null,
-        belt: user.belt || null,
-        score: entry.score,
-        rank: index + 1,
-        is_private: user.is_private || false,
-      };
-    });
+  if (category === "sparring_subs") {
+    return buildSparringAggregateLeaderboard(
+      "total_submissions_by_me",
+      periodStart,
+      userIds,
+    );
   }
 
   // For streak category, pull directly from users table
@@ -286,43 +301,50 @@ function formatEntries(
   previousRanks = new Map(),
 ) {
   const blockedSet = new Set(blockedIds);
-  return entries
-    .filter((e) => !blockedSet.has(e.user_id))
-    .map((entry, index) => {
-      const rank = index + 1;
-      const prevRank = previousRanks.get(entry.user_id);
-      let trend = "new";
-      let rank_change = 0;
+  const filtered = entries.filter((e) => !blockedSet.has(e.user_id));
 
-      if (prevRank !== undefined) {
-        rank_change = prevRank - rank; // positive = moved up
-        if (rank_change > 0) trend = "up";
-        else if (rank_change < 0) trend = "down";
-        else trend = "same";
-      }
+  let lastScore = null;
+  let lastRank = 0;
 
-      const formatted = {
-        user_id: entry.user_id,
-        first_name: entry.first_name,
-        last_name: entry.last_name,
-        avatar_url: entry.avatar_url,
-        belt: entry.belt,
-        score: entry.score,
-        value: entry.score, // alias for frontend compatibility
-        rank,
-        trend,
-        rank_change: Math.abs(rank_change),
-        is_current_user: entry.user_id === currentUserId,
-      };
+  return filtered.map((entry, index) => {
+    // Competition ranking: tied scores share the same rank (1, 1, 3 — not 1, 2, 3)
+    const rank = entry.score === lastScore ? lastRank : index + 1;
+    lastScore = entry.score;
+    lastRank = rank;
 
-      // Optimize avatar
-      if (formatted.avatar_url) {
-        const optimized = optimizeUserImages(formatted);
-        formatted.avatar_url = optimized.avatar_url;
-      }
+    const prevRank = previousRanks.get(entry.user_id);
+    let trend = "new";
+    let rank_change = 0;
 
-      return formatted;
-    });
+    if (prevRank !== undefined) {
+      rank_change = prevRank - rank; // positive = moved up
+      if (rank_change > 0) trend = "up";
+      else if (rank_change < 0) trend = "down";
+      else trend = "same";
+    }
+
+    const formatted = {
+      user_id: entry.user_id,
+      first_name: entry.first_name,
+      last_name: entry.last_name,
+      avatar_url: entry.avatar_url,
+      belt: entry.belt,
+      score: entry.score,
+      value: entry.score, // alias for frontend compatibility
+      rank,
+      trend,
+      rank_change: Math.abs(rank_change),
+      is_current_user: entry.user_id === currentUserId,
+    };
+
+    // Optimize avatar
+    if (formatted.avatar_url) {
+      const optimized = optimizeUserImages(formatted);
+      formatted.avatar_url = optimized.avatar_url;
+    }
+
+    return formatted;
+  });
 }
 
 // GET /leaderboard — Global rankings
