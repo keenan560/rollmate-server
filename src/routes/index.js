@@ -25,6 +25,8 @@ const trainingReminderRoutes = require("./trainingReminder.routes");
 const leaderboardRoutes = require("./leaderboard.routes");
 const engagementRoutes = require("./engagement.routes");
 const sparringRoutes = require("./sparring.routes");
+const subscriptionRoutes = require("./subscription.routes");
+const voiceLogRoutes = require("./voiceLog.routes");
 
 // Mount routes
 router.use("/", authRoutes);
@@ -51,5 +53,7 @@ router.use("/", trainingReminderRoutes);
 router.use("/", leaderboardRoutes);
 router.use("/", engagementRoutes);
 router.use("/", sparringRoutes);
+router.use("/", subscriptionRoutes);
+router.use("/", voiceLogRoutes);
 
 module.exports = router;

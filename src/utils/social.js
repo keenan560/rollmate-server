@@ -32,6 +32,25 @@ async function getFriendIds(userId) {
   return ordered;
 }
 
+// Whether two specific users have an accepted roll_requests row between them.
+async function areFriends(userIdA, userIdB) {
+  if (userIdA === userIdB) return false;
+  const { data, error } = await supabase
+    .from("roll_requests")
+    .select("id")
+    .eq("status", "accepted")
+    .or(
+      `and(sender_id.eq.${userIdA},receiver_id.eq.${userIdB}),and(sender_id.eq.${userIdB},receiver_id.eq.${userIdA})`,
+    )
+    .limit(1);
+
+  if (error) {
+    console.error("[social] areFriends error:", error.message);
+    return false;
+  }
+  return (data || []).length > 0;
+}
+
 // Returns IDs of users in a blocking relationship with this user, in either
 // direction (users they blocked + users who blocked them).
 async function getBlockedUserIds(userId) {
@@ -52,4 +71,4 @@ async function getBlockedUserIds(userId) {
   return [...ids];
 }
 
-module.exports = { getFriendIds, getBlockedUserIds };
+module.exports = { getFriendIds, getBlockedUserIds, areFriends };

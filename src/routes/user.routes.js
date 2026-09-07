@@ -92,6 +92,7 @@ router.post("/register", verifyToken, async (req, res, next) => {
           ? req.body.dob
           : null,
       primary_gym: req.body.primary_gym,
+      primary_gym_place_id: req.body.primary_gym_place_id || null,
       style_preference: "both",
       competition_experience: false,
       is_instructor: req.body.is_instructor || false,
@@ -433,6 +434,8 @@ router.post("/update-profile", verifyToken, async (req, res) => {
       updates.experience = updateData.experience;
     if (updateData.primary_gym !== undefined)
       updates.primary_gym = updateData.primary_gym;
+    if (updateData.primary_gym_place_id !== undefined)
+      updates.primary_gym_place_id = updateData.primary_gym_place_id;
     if (updateData.bjj_start_year !== undefined)
       updates.bjj_start_year = updateData.bjj_start_year;
     if (updateData.avatar_url !== undefined)

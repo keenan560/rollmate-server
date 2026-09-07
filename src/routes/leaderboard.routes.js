@@ -4,6 +4,8 @@ const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { getFriendIds, getBlockedUserIds } = require("../utils/social");
 const { optimizeUserImages } = require("../utils/imageOptimization");
+const { sendNotification } = require("../services/notification");
+const { requireSubscription } = require("../middleware/subscription");
 
 const VALID_CATEGORIES = [
   "sessions",
@@ -15,6 +17,15 @@ const VALID_CATEGORIES = [
   "sparring_subs",
 ];
 const VALID_PERIODS = ["weekly", "monthly", "all_time"];
+const CATEGORY_LABELS = {
+  sessions: "Sessions",
+  mat_time: "Mat Time",
+  sparring_rounds: "Sparring",
+  rounds: "Sparring",
+  streak: "Streak",
+  sparring_points: "Points",
+  sparring_subs: "Subs",
+};
 
 // Normalize category aliases
 function normalizeCategory(cat) {
@@ -293,6 +304,30 @@ async function getPreviousPeriodRanks(category, period, userIds = null) {
   return rankMap;
 }
 
+// Attach belt_verified to each entry and, optionally, drop unverified users.
+// A single batched lookup regardless of which code path built the entries
+// (RPC, aggregate, streak, or fallback) so we don't have to touch every
+// individual `users` select above.
+async function applyVerification(entries, verifiedOnly) {
+  if (!entries.length) return entries;
+
+  const ids = entries.map((e) => e.user_id);
+  const { data: rows, error } = await supabase
+    .from("users")
+    .select("id, belt_verified")
+    .in("id", ids);
+  if (error) throw error;
+
+  const verifiedMap = new Map((rows || []).map((u) => [u.id, !!u.belt_verified]));
+  const withVerification = entries.map((e) => ({
+    ...e,
+    belt_verified: verifiedMap.get(e.user_id) || false,
+  }));
+
+  if (!verifiedOnly) return withVerification;
+  return withVerification.filter((e) => e.belt_verified);
+}
+
 // Format entries for response, respecting privacy and blocked users
 function formatEntries(
   entries,
@@ -329,6 +364,7 @@ function formatEntries(
       last_name: entry.last_name,
       avatar_url: entry.avatar_url,
       belt: entry.belt,
+      belt_verified: entry.belt_verified || false,
       score: entry.score,
       value: entry.score, // alias for frontend compatibility
       rank,
@@ -347,8 +383,8 @@ function formatEntries(
   });
 }
 
-// GET /leaderboard — Global rankings
-router.get("/leaderboard", verifyToken, async (req, res) => {
+// GET /leaderboard — Global rankings (Pro — gym/friends are the free tiers)
+router.get("/leaderboard", verifyToken, requireSubscription, async (req, res) => {
   try {
     const rawCategory = req.query.category || "sessions";
     const period = req.query.period || "weekly";
@@ -365,13 +401,16 @@ router.get("/leaderboard", verifyToken, async (req, res) => {
     }
 
     const category = normalizeCategory(rawCategory);
+    const verifiedOnly = req.query.verified_only === "true";
     const userId = req.user.uid;
+
     const blockedIds = await getBlockedUserIds(userId);
 
-    const [entries, previousRanks] = await Promise.all([
+    const [rawEntries, previousRanks] = await Promise.all([
       buildLeaderboard({ category, period }),
       getPreviousPeriodRanks(category, period),
     ]);
+    const entries = await applyVerification(rawEntries, verifiedOnly);
     const formatted = formatEntries(entries, blockedIds, userId, previousRanks);
 
     // Find current user's entry
@@ -382,6 +421,7 @@ router.get("/leaderboard", verifyToken, async (req, res) => {
       current_user_entry: currentUserEntry,
       category: rawCategory,
       period,
+      verified_only: verifiedOnly,
       updated_at: new Date().toISOString(),
     });
   } catch (error) {
@@ -408,7 +448,9 @@ router.get("/leaderboard/friends", verifyToken, async (req, res) => {
     }
 
     const category = normalizeCategory(rawCategory);
+    const verifiedOnly = req.query.verified_only === "true";
     const userId = req.user.uid;
+
     const [friendIds, blockedIds] = await Promise.all([
       getFriendIds(userId),
       getBlockedUserIds(userId),
@@ -417,10 +459,11 @@ router.get("/leaderboard/friends", verifyToken, async (req, res) => {
     // Include current user in friends leaderboard
     const participantIds = [...new Set([userId, ...friendIds])];
 
-    const [entries, previousRanks] = await Promise.all([
+    const [rawEntries, previousRanks] = await Promise.all([
       buildLeaderboard({ category, period, userIds: participantIds }),
       getPreviousPeriodRanks(category, period, participantIds),
     ]);
+    const entries = await applyVerification(rawEntries, verifiedOnly);
     const formatted = formatEntries(entries, blockedIds, userId, previousRanks);
 
     const currentUserEntry = formatted.find((e) => e.is_current_user) || null;
@@ -430,11 +473,180 @@ router.get("/leaderboard/friends", verifyToken, async (req, res) => {
       current_user_entry: currentUserEntry,
       category: rawCategory,
       period,
+      verified_only: verifiedOnly,
       updated_at: new Date().toISOString(),
     });
   } catch (error) {
     console.error("[leaderboard] friends error:", error.message);
     res.status(500).json({ error: "Failed to fetch friends leaderboard" });
+  }
+});
+
+// GET /leaderboard/gym — Rankings among users at the same gym.
+// `primary_gym` is free text (no canonical gyms table), so membership is a
+// case-insensitive exact match — typos/variants of the same gym name won't
+// group together yet.
+router.get("/leaderboard/gym", verifyToken, async (req, res) => {
+  try {
+    const rawCategory = req.query.category || "sessions";
+    const period = req.query.period || "weekly";
+
+    if (!VALID_CATEGORIES.includes(rawCategory)) {
+      return res.status(400).json({
+        error: `Invalid category. Must be one of: ${VALID_CATEGORIES.join(", ")}`,
+      });
+    }
+    if (!VALID_PERIODS.includes(period)) {
+      return res.status(400).json({
+        error: `Invalid period. Must be one of: ${VALID_PERIODS.join(", ")}`,
+      });
+    }
+
+    const category = normalizeCategory(rawCategory);
+    const verifiedOnly = req.query.verified_only === "true";
+    const userId = req.user.uid;
+
+    const { data: me, error: meErr } = await supabase
+      .from("users")
+      .select("primary_gym, primary_gym_place_id")
+      .eq("id", userId)
+      .single();
+    if (meErr) throw meErr;
+
+    const gym = (me?.primary_gym || "").trim();
+    const gymPlaceId = me?.primary_gym_place_id || null;
+    if ((!gym && !gymPlaceId) || gym.toLowerCase() === "not specified") {
+      return res.json({
+        entries: [],
+        current_user_entry: null,
+        category: rawCategory,
+        period,
+        gym: null,
+        verified_only: verifiedOnly,
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    // Prefer grouping by Google Place ID — an exact, unambiguous match so
+    // "Gracie Barra Murfreesboro" and "GB Murfreesboro" land in the same
+    // group regardless of how each person typed it. Users who haven't
+    // re-selected their gym through the Places picker yet don't have a
+    // place_id, so fall back to the old free-text match for them.
+    const gymUsersQuery = gymPlaceId
+      ? supabase
+          .from("users")
+          .select("id")
+          .eq("primary_gym_place_id", gymPlaceId)
+      : supabase.from("users").select("id").ilike("primary_gym", gym);
+
+    const [{ data: gymUsers, error: gymErr }, blockedIds] = await Promise.all([
+      gymUsersQuery,
+      getBlockedUserIds(userId),
+    ]);
+    if (gymErr) throw gymErr;
+    const participantIds = (gymUsers || []).map((u) => u.id);
+
+    const [rawEntries, previousRanks] = await Promise.all([
+      buildLeaderboard({ category, period, userIds: participantIds }),
+      getPreviousPeriodRanks(category, period, participantIds),
+    ]);
+    const entries = await applyVerification(rawEntries, verifiedOnly);
+    const formatted = formatEntries(entries, blockedIds, userId, previousRanks);
+
+    const currentUserEntry = formatted.find((e) => e.is_current_user) || null;
+
+    res.json({
+      entries: formatted,
+      current_user_entry: currentUserEntry,
+      category: rawCategory,
+      period,
+      gym,
+      verified_only: verifiedOnly,
+      updated_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("[leaderboard] gym error:", error.message);
+    res.status(500).json({ error: "Failed to fetch gym leaderboard" });
+  }
+});
+
+// POST /leaderboard/congratulate — send a lightweight "nice one" ping to
+// whoever's leading a leaderboard. Reuses the existing notifications table
+// and push service; no new schema.
+router.post("/leaderboard/congratulate", verifyToken, async (req, res) => {
+  try {
+    const fromUserId = req.user.uid;
+    const { toUserId, category, period, rank } = req.body;
+
+    if (!toUserId) {
+      return res.status(400).json({ error: "toUserId is required" });
+    }
+    if (toUserId === fromUserId) {
+      return res.status(400).json({ error: "Can't congratulate yourself" });
+    }
+    if (!VALID_CATEGORIES.includes(category)) {
+      return res.status(400).json({ error: "Invalid category" });
+    }
+    if (!VALID_PERIODS.includes(period)) {
+      return res.status(400).json({ error: "Invalid period" });
+    }
+
+    const referenceId = `${category}:${period}`;
+
+    // Don't let the same person spam the same congrats repeatedly for the
+    // same standing — one per week is plenty.
+    const { data: existing, error: existingErr } = await supabase
+      .from("notifications")
+      .select("id")
+      .eq("user_id", toUserId)
+      .eq("actor_id", fromUserId)
+      .eq("type", "leaderboard_congrats")
+      .eq("reference_id", referenceId)
+      .gte("created_at", new Date(Date.now() - 7 * 86400000).toISOString())
+      .limit(1);
+    if (existingErr) throw existingErr;
+    if (existing && existing.length > 0) {
+      return res.json({ success: true, alreadySent: true });
+    }
+
+    const { data: fromUser, error: fromUserErr } = await supabase
+      .from("users")
+      .select("first_name, last_name, avatar_url")
+      .eq("id", fromUserId)
+      .single();
+    if (fromUserErr) throw fromUserErr;
+
+    const fromName = fromUser
+      ? `${fromUser.first_name} ${fromUser.last_name}`
+      : "Someone";
+    const categoryLabel = CATEGORY_LABELS[category] || category;
+    const rankLabel = rank === 1 ? "taking #1" : `your #${rank || "?"} spot`;
+    const periodLabel = period === "all_time" ? "all-time" : period;
+
+    const { error: insertErr } = await supabase.from("notifications").insert({
+      user_id: toUserId,
+      type: "leaderboard_congrats",
+      title: `${fromName} congratulated you! 🎉`,
+      body: `For ${rankLabel} in ${categoryLabel} this ${periodLabel}.`,
+      actor_id: fromUserId,
+      actor_name: fromName,
+      actor_avatar: fromUser?.avatar_url || null,
+      reference_id: referenceId,
+    });
+    if (insertErr) throw insertErr;
+
+    sendNotification(
+      toUserId,
+      `${fromName} congratulated you for ${rankLabel} in ${categoryLabel}!`,
+      { title: "🎉 Nice one!", data: { type: "leaderboard_congrats" } },
+    ).catch((err) =>
+      console.error("[leaderboard] congrats push error:", err.message),
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("[leaderboard] congratulate error:", error.message);
+    res.status(500).json({ error: "Failed to send congratulations" });
   }
 });
 

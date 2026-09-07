@@ -580,19 +580,53 @@ router.get("/training-logs/recent", verifyToken, async (req, res) => {
       ),
     );
 
-    // Get ALL training logs from last 7 days
+    // Get ALL training logs + sparring sessions from last 7 days
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const sinceDate = since.split("T")[0];
 
-    const { data: logs, error } = await supabase
-      .from("training_logs")
-      .select("*")
-      .gte("date", since)
-      .order("date", { ascending: false });
+    const [
+      { data: logs, error },
+      { data: sparringSessions, error: ssError },
+    ] = await Promise.all([
+      supabase
+        .from("training_logs")
+        .select("*")
+        .gte("date", since)
+        .order("date", { ascending: false }),
+      supabase
+        .from("sparring_sessions")
+        .select("*")
+        .gte("session_date", sinceDate)
+        .order("session_date", { ascending: false }),
+    ]);
 
     if (error) throw error;
+    if (ssError) throw ssError;
 
-    // Get user info + privacy status for all log authors
-    const userIds = [...new Set((logs || []).map((l) => l.user_id))];
+    // Map sparring sessions to the same shape as a training log entry.
+    const sparringAsLogs = (sparringSessions || []).map((s) => ({
+      id: s.id,
+      entry_type: "sparring",
+      user_id: s.user_id,
+      date: s.session_date,
+      duration_minutes: 0,
+      training_type: s.training_type || "nogi",
+      intensity: "hard",
+      techniques_practiced: [],
+      sparring_rounds: s.total_rounds,
+      notes: s.notes || "",
+      partner_id: null,
+      rounds_count: s.total_rounds,
+      total_my_points: s.total_points_scored,
+      total_their_points: s.total_points_conceded,
+      total_submissions_by_me: s.total_submissions_by_me,
+      total_submissions_on_me: s.total_submissions_by_them,
+    }));
+
+    const allEntries = [...(logs || []), ...sparringAsLogs];
+
+    // Get user info + privacy status for all entry authors
+    const userIds = [...new Set(allEntries.map((l) => l.user_id))];
     const { data: users } = await supabase
       .from("users")
       .select("id, first_name, last_name, avatar_url, belt, is_private")
@@ -606,7 +640,7 @@ router.get("/training-logs/recent", verifyToken, async (req, res) => {
     // Resolve partner names
     const partnerIds = [
       ...new Set(
-        (logs || []).filter((l) => l.partner_id).map((l) => l.partner_id),
+        allEntries.filter((l) => l.partner_id).map((l) => l.partner_id),
       ),
     ];
     const partnerMap = {};
@@ -621,7 +655,7 @@ router.get("/training-logs/recent", verifyToken, async (req, res) => {
     }
 
     // Filter: show all public users + friends + self. Hide private non-friends.
-    const enriched = (logs || [])
+    const enriched = allEntries
       .filter((log) => {
         const author = userMap[log.user_id];
         if (!author) return false;
@@ -642,7 +676,8 @@ router.get("/training-logs/recent", verifyToken, async (req, res) => {
             ? partnerMap[log.partner_id] || null
             : null,
         };
-      });
+      })
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
 
     res.status(200).json(enriched);
   } catch (error) {

@@ -1,10 +1,117 @@
 const express = require("express");
 const router = express.Router();
-const { Client } = require("@googlemaps/google-maps-services-js");
+const {
+  Client,
+  PlaceAutocompleteType,
+} = require("@googlemaps/google-maps-services-js");
 const { verifyToken } = require("../middleware/auth");
 
 const googleMapsClient = new Client({});
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
+
+// Google's Autocomplete `types` request param only accepts coarse buckets
+// (establishment/geocode/address/regions/cities) — there's no "gym" or
+// "martial arts" option to ask for up front. So we ask for `establishment`
+// (any business) and drop obviously-irrelevant results afterward using the
+// category tags Google *does* return per result. This is a blocklist, not
+// an allowlist requiring "gym" — some legitimate BJJ academies get tagged
+// inconsistently (e.g. just "health" or "point_of_interest"), and hiding
+// those false-negatives would be worse than an occasional stray result.
+const EXCLUDED_PLACE_TYPES = new Set([
+  "department_store",
+  "supermarket",
+  "grocery_or_supermarket",
+  "shopping_mall",
+  "convenience_store",
+  "restaurant",
+  "food",
+  "meal_takeaway",
+  "meal_delivery",
+  "cafe",
+  "bar",
+  "clothing_store",
+  "electronics_store",
+  "furniture_store",
+  "hardware_store",
+  "home_goods_store",
+  "pharmacy",
+  "drugstore",
+  "gas_station",
+  "car_dealer",
+  "car_repair",
+  "car_wash",
+  "bank",
+  "atm",
+  "lodging",
+  "hospital",
+  "doctor",
+  "dentist",
+  "veterinary_care",
+  "school",
+  "university",
+  "church",
+  "place_of_worship",
+  "real_estate_agency",
+  "insurance_agency",
+  "lawyer",
+  "accounting",
+]);
+
+const isLikelyGymResult = (prediction) =>
+  !prediction.types?.some((t) => EXCLUDED_PLACE_TYPES.has(t));
+
+// GET /places/gym-autocomplete
+// Text-search-as-you-type for a user's gym, restricted to businesses.
+// Pass the same `sessiontoken` on this call and the follow-up
+// /places/gym-details call so Google bills the pair as one free
+// Autocomplete session instead of per-request.
+router.get("/places/gym-autocomplete", verifyToken, async (req, res) => {
+  try {
+    const { input, sessiontoken, lat, lng } = req.query;
+
+    if (!input || !input.trim()) {
+      return res.json({ predictions: [] });
+    }
+
+    if (!GOOGLE_PLACES_API_KEY) {
+      console.error("GOOGLE_PLACES_API_KEY is not configured");
+      return res.status(500).json({
+        error: "Google Places API is not configured",
+      });
+    }
+
+    const params = {
+      input,
+      types: PlaceAutocompleteType.establishment,
+      key: GOOGLE_PLACES_API_KEY,
+    };
+    if (sessiontoken) params.sessiontoken = sessiontoken;
+    if (lat && lng) {
+      params.location = { lat: parseFloat(lat), lng: parseFloat(lng) };
+      params.radius = 80000; // ~50 miles — bias, not a hard restriction
+    }
+
+    const response = await googleMapsClient.placeAutocomplete({
+      params,
+      timeout: 10000,
+    });
+
+    const predictions = (response.data.predictions || []).filter(
+      isLikelyGymResult,
+    );
+
+    res.json({
+      predictions,
+      status: response.data.status,
+    });
+  } catch (error) {
+    console.error("Error fetching gym autocomplete:", error);
+    res.status(500).json({
+      error: "Failed to fetch gym suggestions",
+      message: error.message,
+    });
+  }
+});
 
 // GET /places/nearby-gyms
 // Search for BJJ gyms near a location
@@ -152,6 +259,7 @@ router.get("/places/test-nearby-gyms", async (req, res) => {
 router.get("/places/gym-details/:place_id", verifyToken, async (req, res) => {
   try {
     const { place_id } = req.params;
+    const { sessiontoken } = req.query;
 
     if (!place_id) {
       return res.status(400).json({
@@ -167,23 +275,29 @@ router.get("/places/gym-details/:place_id", verifyToken, async (req, res) => {
 
     console.log(`Fetching details for place_id: ${place_id}`);
 
+    const params = {
+      place_id: place_id,
+      fields: [
+        "name",
+        "formatted_address",
+        "formatted_phone_number",
+        "website",
+        "opening_hours",
+        "rating",
+        "user_ratings_total",
+        "photos",
+        "geometry",
+        "url",
+      ],
+      key: GOOGLE_PLACES_API_KEY,
+    };
+    // Pairs this call with the preceding /places/gym-autocomplete call for
+    // Google's free session-based Autocomplete pricing — omit only for
+    // details lookups that didn't originate from an autocomplete session.
+    if (sessiontoken) params.sessiontoken = sessiontoken;
+
     const response = await googleMapsClient.placeDetails({
-      params: {
-        place_id: place_id,
-        fields: [
-          "name",
-          "formatted_address",
-          "formatted_phone_number",
-          "website",
-          "opening_hours",
-          "rating",
-          "user_ratings_total",
-          "photos",
-          "geometry",
-          "url",
-        ],
-        key: GOOGLE_PLACES_API_KEY,
-      },
+      params,
       timeout: 10000,
     });
 
