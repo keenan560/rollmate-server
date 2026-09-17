@@ -527,24 +527,31 @@ router.get("/leaderboard/gym", verifyToken, async (req, res) => {
       });
     }
 
-    // Prefer grouping by Google Place ID — an exact, unambiguous match so
-    // "Gracie Barra Murfreesboro" and "GB Murfreesboro" land in the same
-    // group regardless of how each person typed it. Users who haven't
-    // re-selected their gym through the Places picker yet don't have a
-    // place_id, so fall back to the old free-text match for them.
-    const gymUsersQuery = gymPlaceId
-      ? supabase
-          .from("users")
-          .select("id")
-          .eq("primary_gym_place_id", gymPlaceId)
-      : supabase.from("users").select("id").ilike("primary_gym", gym);
+    // Match by Google Place ID (exact, unambiguous — "Gracie Barra
+    // Murfreesboro" and "GB Murfreesboro" land in the same group) UNION
+    // free-text primary_gym (case-insensitive). Run both, not either/or:
+    // most users haven't re-selected their gym through the Places picker
+    // yet and only have the old free-text value, so relying on place_id
+    // alone whenever the viewer happens to have one would silently drop
+    // everyone who doesn't — exactly the bug this caused before.
+    const gymQueries = [];
+    if (gymPlaceId) {
+      gymQueries.push(
+        supabase.from("users").select("id").eq("primary_gym_place_id", gymPlaceId),
+      );
+    }
+    if (gym) {
+      gymQueries.push(supabase.from("users").select("id").ilike("primary_gym", gym));
+    }
 
-    const [{ data: gymUsers, error: gymErr }, blockedIds] = await Promise.all([
-      gymUsersQuery,
+    const [gymResults, blockedIds] = await Promise.all([
+      Promise.all(gymQueries),
       getBlockedUserIds(userId),
     ]);
-    if (gymErr) throw gymErr;
-    const participantIds = (gymUsers || []).map((u) => u.id);
+    for (const { error } of gymResults) if (error) throw error;
+    const participantIds = [
+      ...new Set(gymResults.flatMap((r) => (r.data || []).map((u) => u.id))),
+    ];
 
     const [rawEntries, previousRanks] = await Promise.all([
       buildLeaderboard({ category, period, userIds: participantIds }),

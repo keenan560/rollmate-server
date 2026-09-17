@@ -7,6 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "env:uat": "node scripts/setup-env.js uat",
+    "env:prod": "node scripts/setup-env.js prod",
     "cleanup-duplicates": "node scripts/cleanup-duplicates.js",
     "backfill-link-previews": "node scripts/backfill-link-previews.js",
     "reconcile-friends-count": "node scripts/reconcile-friends-count.js",
