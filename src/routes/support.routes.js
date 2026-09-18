@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
+const { sendNotification } = require("../services/notification");
 
 // POST /support/contact - Submit a support request
 router.post("/support/contact", verifyToken, async (req, res) => {
@@ -43,8 +44,23 @@ router.post("/support/contact", verifyToken, async (req, res) => {
 
     console.log(`Support ticket created: ${data.id}`);
 
-    // TODO: Send email notification to support team
-    // You can integrate SendGrid, AWS SES, or other email service here
+    // Push the ticket straight to the admin's own device — reuses the
+    // FCM infra already wired up for the app instead of adding a new
+    // email service just for this. No-op (logged) if unconfigured.
+    if (process.env.SUPPORT_ADMIN_USER_ID) {
+      sendNotification(
+        process.env.SUPPORT_ADMIN_USER_ID,
+        `${subject.trim()} — ${message.trim().slice(0, 80)}`,
+        {
+          title: "🎫 New support ticket",
+          data: { type: "support_ticket", ticket_id: data.id, user_id: userId },
+        },
+      ).catch((err) => console.error("Support ticket push error:", err));
+    } else {
+      console.warn(
+        "SUPPORT_ADMIN_USER_ID not set — support ticket created with no notification sent",
+      );
+    }
 
     res.json({
       success: true,
