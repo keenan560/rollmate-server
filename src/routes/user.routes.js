@@ -7,6 +7,7 @@ const { verifyToken } = require("../middleware/auth");
 const { profilePicUpload } = require("../middleware/upload");
 const { optimizeUserImages } = require("../utils/imageOptimization");
 const moderation = require("../services/moderation");
+const { sendNotification } = require("../services/notification");
 
 // Check if user exists
 router.get("/check-user", verifyToken, async (req, res, next) => {
@@ -186,6 +187,21 @@ router.post("/register", verifyToken, async (req, res, next) => {
 
     if (defaultAvailError) {
       console.error("Error adding default availability:", defaultAvailError);
+    }
+
+    // Ping the admin's own device on every new signup — reuses the same
+    // FCM path as support ticket notifications, no UI/app changes needed.
+    if (process.env.SUPPORT_ADMIN_USER_ID) {
+      sendNotification(
+        process.env.SUPPORT_ADMIN_USER_ID,
+        `${userData.first_name} ${userData.last_name} — ${userData.belt} belt${
+          userData.primary_gym ? `, ${userData.primary_gym}` : ""
+        }`,
+        {
+          title: "🥋 New Rollmate user created!",
+          data: { type: "new_signup", user_id: req.user.uid },
+        },
+      ).catch((err) => console.error("Signup notification push error:", err));
     }
 
     res.status(200).json({
