@@ -3,6 +3,7 @@ const router = express.Router();
 const supabase = require("../../config");
 const { verifyToken } = require("../middleware/auth");
 const { isUserSubscribed } = require("../services/subscription");
+const { sendNotification } = require("../services/notification");
 
 // GET /subscriptions/me — current user's premium entitlement status.
 // Frontend calls this once (e.g. on app load) to decide whether to show
@@ -41,6 +42,7 @@ const ACTIVE_EVENT_TYPES = new Set([
   "PRODUCT_CHANGE",
   "NON_RENEWING_PURCHASE",
 ]);
+const PURCHASE_NOTIFY_EVENT_TYPES = new Set(["INITIAL_PURCHASE", "NON_RENEWING_PURCHASE"]);
 const GRACE_EVENT_TYPES = new Set(["BILLING_ISSUE"]);
 const EXPIRED_EVENT_TYPES = new Set(["EXPIRATION"]);
 
@@ -112,6 +114,21 @@ router.post("/webhooks/revenuecat", async (req, res) => {
         current_period_end: periodEnd,
       });
       if (insertErr) throw insertErr;
+    }
+
+    if (
+      PURCHASE_NOTIFY_EVENT_TYPES.has(eventType) &&
+      event.environment === "PRODUCTION" &&
+      process.env.SUPPORT_ADMIN_USER_ID
+    ) {
+      sendNotification(
+        process.env.SUPPORT_ADMIN_USER_ID,
+        `${productId || "Premium"} purchased`,
+        {
+          title: "💰 New Roll Mate subscription",
+          data: { type: "new_subscription", user_id: userId },
+        },
+      ).catch((err) => console.error("Purchase notification push error:", err));
     }
 
     console.log(
