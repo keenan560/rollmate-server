@@ -27,6 +27,7 @@ const engagementRoutes = require("./engagement.routes");
 const sparringRoutes = require("./sparring.routes");
 const subscriptionRoutes = require("./subscription.routes");
 const voiceLogRoutes = require("./voiceLog.routes");
+const statsRoutes = require("./stats.routes");
 
 // Mount routes
 router.use("/", authRoutes);
@@ -55,5 +56,6 @@ router.use("/", engagementRoutes);
 router.use("/", sparringRoutes);
 router.use("/", subscriptionRoutes);
 router.use("/", voiceLogRoutes);
+router.use("/", statsRoutes);
 
 module.exports = router;
